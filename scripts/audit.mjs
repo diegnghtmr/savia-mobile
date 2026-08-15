@@ -8,10 +8,16 @@ const prohibited = /\b(fetch|XMLHttpRequest|WebSocket|Supabase|SQLite|AsyncStora
 const generated = /\.(hbc|bin|png|jpg|jpeg|gif|webp|aab|apk)$/i;
 const docsLike = /(^|\/)(requirements\.txt|CMakeLists\.txt|README\.sh)$|\.(md|mdx)$/i;
 
-async function walk(dir) { return (await Promise.all((await readdir(dir, { withFileTypes: true })).filter((entry) => !["node_modules", ".tmp", ".expo", "coverage"].includes(entry.name)).map(async (entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : join(dir, entry.name)))).flat(); }
+async function walk(dir) { return (await Promise.all((await readdir(dir, { withFileTypes: true })).filter((entry) => !["node_modules", ".tmp", ".expo", "coverage", ".git"].includes(entry.name)).map(async (entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : join(dir, entry.name)))).flat(); }
 
-export async function audit(target = root) {
-  await access(join(target, ".git")).then(() => { throw new Error("parent repository metadata rejected"); }, () => undefined);
+// The boundary is the workspace directory above this module, not this module.
+// Every child of the polyrepo is a repository of its own, so rejecting `.git`
+// in `target` rejected the very layout ADR-0017 authorized — and did it before
+// any other check could run, which left this audit unable to pass anywhere it
+// was actually installed. What must never become a repository is the parent
+// that holds the children side by side.
+export async function audit(target = root, parent = join(target, "..")) {
+  await access(join(parent, ".git")).then(() => { throw new Error("parent repository metadata rejected"); }, () => undefined);
   const files = (await walk(target)).map((path) => relative(target, path)).sort();
   if (JSON.stringify(files) !== JSON.stringify(expected)) throw new Error(`path inventory mismatch: ${files.join(",")}`);
   if (files.some((path) => generated.test(path) || docsLike.test(path))) throw new Error("generated or documentation-like executable path rejected");
