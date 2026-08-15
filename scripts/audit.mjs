@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..");
-export const expected = [".gitignore","mise.toml","package.json","pnpm-workspace.yaml","pnpm-lock.yaml","app.json","tsconfig.json","jest.config.cjs","jest.setup.ts","src/app/_layout.tsx","src/app/index.tsx","src/app/+not-found.tsx","src/mobile-shell/tokens.ts","__tests__/shell.test.tsx","scripts/audit.mjs","scripts/audit.test.mjs"].sort();
+export const expected = [".github/workflows/ci.yml",".gitignore","mise.toml","package.json","pnpm-workspace.yaml","pnpm-lock.yaml","app.json","tsconfig.json","jest.config.cjs","jest.setup.ts","src/app/_layout.tsx","src/app/index.tsx","src/app/+not-found.tsx","src/mobile-shell/tokens.ts","__tests__/shell.test.tsx","scripts/audit.mjs","scripts/audit.test.mjs"].sort();
 const prohibited = /\b(fetch|XMLHttpRequest|WebSocket|Supabase|SQLite|AsyncStorage|localStorage|https?:\/\/|\/v1\/|auth|outbox)\b/i;
 const generated = /\.(hbc|bin|png|jpg|jpeg|gif|webp|aab|apk)$/i;
 const docsLike = /(^|\/)(requirements\.txt|CMakeLists\.txt|README\.sh)$|\.(md|mdx)$/i;

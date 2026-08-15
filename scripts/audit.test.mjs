@@ -25,7 +25,7 @@ test.afterEach(() => rm(workspace, { force: true, recursive: true }));
 
 test("accepts the exact clean boundary", async () => {
   const fixture = await copyFixture();
-  assert.equal((await audit(fixture)).paths, 16);
+  assert.equal((await audit(fixture)).paths, 17);
 });
 
 test("accepts the repository this module is itself kept in", async () => {
