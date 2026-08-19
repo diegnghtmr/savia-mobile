@@ -1,8 +1,8 @@
 import type { ColorSchemeName } from "react-native";
 
-interface Palette { accent: string; canvas: string; disabled: string; disabledInk: string; ink: string; muted: string }
+interface Palette { action: string; canvas: string; disabled: string; muted: string; raised: string; text: string }
 
-const LIGHT: Palette = { accent: "#1F6A4A", canvas: "#F5F2E9", disabled: "#D7D2C5", disabledInk: "#625F58", ink: "#18251F", muted: "#55635C" };
-const DARK: Palette = { accent: "#75D3A7", canvas: "#101713", disabled: "#303A34", disabledInk: "#AAB4AE", ink: "#EFF6F1", muted: "#B8C4BD" };
+const LIGHT: Palette = { action: "#075A9C", canvas: "#F8F5EF", disabled: "#4F5C67", muted: "#53606D", raised: "#F1ECE3", text: "#20252B" };
+const DARK: Palette = { action: "#8DCCFF", canvas: "#17212B", disabled: "#BCC8D0", muted: "#C5D0D8", raised: "#293844", text: "#F7F3EA" };
 
 export function paletteFor(scheme: ColorSchemeName): Palette { return scheme === "dark" ? DARK : LIGHT; }
