@@ -6,16 +6,16 @@ export default function HomeScreen() {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: colors.canvas }]}>
+    <SafeAreaView testID="canvas" style={[styles.safe, { backgroundColor: colors.canvas }]}>
       <ScrollView contentContainerStyle={styles.content} accessibilityLabel="Resumen diario" testID={`viewport-${width}-${fontScale}`}>
         <View accessibilityRole="header">
-          <Text style={[styles.eyebrow, { color: colors.accent }]}>Savia</Text>
-          <Text style={[styles.title, { color: colors.ink }]}>Tu dinero, con calma</Text>
+          <Text style={[styles.eyebrow, { color: colors.action }]}>Savia</Text>
+          <Text style={[styles.title, { color: colors.text }]}>Tu dinero, con calma</Text>
         </View>
         <Text style={[styles.body, { color: colors.muted }]}>Todavía no hay información financiera disponible.</Text>
-        <Text style={[styles.body, { color: colors.ink }]}>Cuando exista una fuente autorizada, vas a verla acá.</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.disabled }]}>
-          <Text style={{ color: colors.disabledInk }}>Registrar movimiento</Text>
+        <Text style={[styles.body, { color: colors.text }]}>Cuando exista una fuente autorizada, vas a verla acá.</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.raised }]}>
+          <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
