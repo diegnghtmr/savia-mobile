@@ -3,6 +3,7 @@ import { StyleSheet, useColorScheme, useWindowDimensions } from "react-native";
 import { HomeScreen } from "../src/app/index";
 import NotFoundScreen from "../src/app/+not-found";
 
+jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn() }));
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));

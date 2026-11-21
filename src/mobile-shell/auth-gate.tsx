@@ -5,7 +5,7 @@ import type { Auth } from "../foundation/auth";
 import type { Identity } from "../foundation/identity";
 import { InvalidDraft, validEmail, workspaceUnavailable } from "../foundation/identity-draft";
 import { TransportError } from "../foundation/transport";
-import type { WorkspaceContext } from "../foundation/workspace-context";
+import type { Workspace, WorkspaceContext } from "../foundation/workspace-context";
 import { paletteFor } from "./tokens";
 
 export function AuthPanel({ children }: { children: ReactNode }) {
@@ -15,9 +15,9 @@ export function AuthPanel({ children }: { children: ReactNode }) {
   </SafeAreaView>;
 }
 
-export function AuthAction({ label, action, disabled = false }: { label: string; action: () => void; disabled?: boolean }) {
+export function AuthAction({ label, action, disabled = false, selected }: { label: string; action: () => void; disabled?: boolean; selected?: boolean }) {
   const colors = paletteFor(useColorScheme());
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={action} style={{ minHeight: 44, minWidth: 44, padding: 12, backgroundColor: colors.raised }}>
+  return <Pressable accessibilityRole="button" accessibilityState={{ disabled, ...(selected !== undefined && { selected }) }} disabled={disabled} onPress={action} style={{ minHeight: 44, minWidth: 44, padding: 12, backgroundColor: colors.raised }}>
     <Text style={{ color: disabled ? colors.disabled : colors.action }}>{label}</Text>
   </Pressable>;
 }
@@ -45,7 +45,7 @@ function RecoveryForm({ identity, busy, submit }: { identity: Identity; busy: bo
 
 const unauthorized = (error: unknown) => error instanceof TransportError && error.kind === "http" && error.status === 401;
 type Route = "loading" | "sign-in" | "onboarding" | "workspace" | "retry";
-export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity: Identity; home: ReactNode }) {
+export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace) => ReactNode) }) {
   const colors = paletteFor(useColorScheme());
   const [route, setRoute] = useState<Route>("loading");
   const [context, setContext] = useState<WorkspaceContext | null>(null);
@@ -103,7 +103,7 @@ export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity:
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
   if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
     <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>
-    {home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
+    {typeof home === "function" ? home(context.active) : home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
   </View>;
   const title = route === "sign-in" ? (signup ? "Crear cuenta" : "Iniciar sesión") : route === "onboarding" ? "Completa tu perfil" : route === "workspace" ? (context?.items.length ? "Elige un espacio" : "No tienes espacios disponibles") : route === "retry" ? "No pudimos verificar tu perfil" : "Verificando tu perfil…";
   const field = { minHeight: 44, padding: 12, backgroundColor: colors.raised, color: colors.text };

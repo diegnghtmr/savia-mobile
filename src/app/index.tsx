@@ -1,18 +1,28 @@
 import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, useWindowDimensions, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useState } from "react";
+import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
 import { createIdentity } from "../foundation/identity";
 import { createTransport } from "../foundation/transport";
-import { AuthGate } from "../mobile-shell/auth-gate";
+import { AccountsScreen } from "../mobile-shell/accounts-screen";
+import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { paletteFor } from "../mobile-shell/tokens";
 
-const identity = createIdentity((operation) => createTransport({ sessions: { read: () => getAuth().readSession() } }).withSession(operation));
+const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
+const identity = createIdentity((operation) => transport().withSession(operation));
 
 export default function Index() {
-  return <AuthGate auth={getAuth} identity={identity} home={<HomeScreen />} />;
+  return <AuthGate auth={getAuth} identity={identity} home={({ id }) => <WorkspaceHome key={id} id={id} />} />;
 }
 
-export function HomeScreen() {
+function WorkspaceHome({ id }: { id: string }) {
+  const [accounts, showAccounts] = useState(false);
+  const [api] = useState(() => createAccounts((...args) => transport().requestInWorkspace(...args), id));
+  return accounts ? <AccountsScreen api={api} back={() => showAccounts(false)} /> : <HomeScreen openAccounts={() => showAccounts(true)} />;
+}
+
+export function HomeScreen({ openAccounts }: { openAccounts?: () => void } = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -27,6 +37,7 @@ export function HomeScreen() {
         <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.raised }]}>
           <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>
         </Pressable>
+        {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
       </ScrollView>
     </SafeAreaView>
   );
