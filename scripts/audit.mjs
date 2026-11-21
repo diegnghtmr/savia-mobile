@@ -8,7 +8,8 @@ const ignored = new Set(["node_modules", ".tmp", ".expo", "coverage", ".git"]);
 const sourceFile = /\.(?:[cm]?[jt]sx?|json)$/i;
 const artifact = /\.(?:hbc|bin|png|jpe?g|gif|webp|aab|apk|mdx?)$|(?:^|\/)(?:requirements\.txt|CMakeLists\.txt|README\.sh)$/i;
 const testFile = /(?:^|\/)__tests__\/|(?:^|\/)jest\.setup\.ts$|\.(?:test|spec)\.[cm]?[jt]sx?$/;
-const network = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|axios|superagent)\b|@supabase\/supabase-js/i;
+const network = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|axios|superagent)\b/i;
+const supabase = /@supabase\/[\w-]+/gi;
 const plainStorage = /\b(?:async-storage|AsyncStorage|localStorage|sessionStorage|expo-file-system|react-native-fs|react-native-mmkv|expo-sqlite)\b|["'](?:node:)?fs(?:\/promises)?["']/i;
 const serviceKey = /\b\w*(?:supabase\w*(?:service_?role|service_?key|secret_?key)|service_?role_?key)\w*\b/i;
 const secret = /\b(?:sb_secret_[\w-]+|svt_[\w-]{16,}|eyJ[\w-]+\.[\w-]+\.[\w-]+|sk_(?:live|test)_[\w-]+)\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:pass(?:word|wd)|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization)["']?\s*[:=]\s*["'`][^"'`\r\n]+["'`]/i;
@@ -50,6 +51,9 @@ export async function audit(target = root, parent = join(target, "..")) {
     const reject = (message) => { throw new Error(`${path}: ${message}`); };
     if (serviceKey.test(text)) reject("privileged Supabase credential");
     if (secret.test(text)) reject("embedded secret");
+    if ((appCode || appDependency) && (text.match(supabase) ?? []).some((name) =>
+      name !== "@supabase/supabase-js" || !(appDependency || path === "src/foundation/auth.ts"),
+    )) reject("Supabase outside auth");
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
     if ((appCode || appDependency) && plainStorage.test(text)) reject("unapproved persistence");

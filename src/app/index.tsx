@@ -1,8 +1,19 @@
 import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, useWindowDimensions, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { getAuth } from "../foundation/auth";
+import { createTransport } from "../foundation/transport";
+import { AuthGate } from "../mobile-shell/auth-gate";
 import { paletteFor } from "../mobile-shell/tokens";
 
-export default function HomeScreen() {
+function request(path: string, options: { successStatus: number }) {
+  return createTransport({ sessions: { read: () => getAuth().readSession() } }).request(path, options);
+}
+
+export default function Index() {
+  return <AuthGate auth={getAuth} request={request} home={<HomeScreen />} />;
+}
+
+export function HomeScreen() {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (

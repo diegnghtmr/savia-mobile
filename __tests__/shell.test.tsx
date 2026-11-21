@@ -1,7 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react-native";
 import { StyleSheet, useColorScheme, useWindowDimensions } from "react-native";
-import HomeScreen from "../src/app/index";
+import { HomeScreen } from "../src/app/index";
 import NotFoundScreen from "../src/app/+not-found";
+
+jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
+jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));
 
 jest.mock("react-native/Libraries/Utilities/useColorScheme", () => ({ default: jest.fn(() => "light") }));
 jest.mock("react-native/Libraries/Utilities/useWindowDimensions", () => ({ default: jest.fn(() => ({ fontScale: 1, height: 640, scale: 1, width: 320 })) }));

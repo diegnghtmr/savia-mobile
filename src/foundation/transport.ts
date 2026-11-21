@@ -1,9 +1,9 @@
 import { fetch as expoFetch } from "expo/fetch";
 import { readApiOrigin } from "./config";
-import { sessionStore } from "./session-store";
+import { sessionStore, type SessionCredentials } from "./session-store";
 
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
-type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string };
+type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string; successStatus?: number };
 
 export class TransportError extends Error {
   constructor(
@@ -21,11 +21,11 @@ export function createTransport({
   baseUrl, development, timeoutMs = 10_000, send = expoFetch, sessions = sessionStore,
 }: {
   baseUrl?: string; development?: boolean; timeoutMs?: number;
-  send?: Send; sessions?: Pick<typeof sessionStore, "read">;
+  send?: Send; sessions?: { read(): Promise<Pick<SessionCredentials, "accessToken"> | null> };
 } = {}) {
   const origin = readApiOrigin(baseUrl, development);
   return {
-    async request(path: string, { method = "GET", body, idempotencyKey }: RequestInput = {}): Promise<unknown> {
+    async request(path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}): Promise<unknown> {
       if (!path.startsWith("/") || path.startsWith("//") || /[\s\\#\x00-\x1f]/.test(path)) {
         throw new TypeError("Invalid Savia API path");
       }
@@ -49,7 +49,10 @@ export function createTransport({
           method, headers, body: payload, signal: controller.signal, redirect: "error", credentials: "omit",
         });
         if (response.redirected || (response.status >= 300 && response.status < 400)) throw new TransportError("redirect");
-        if (response.ok) return response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        if (response.ok) {
+          if (successStatus !== undefined && response.status !== successStatus) throw new TransportError("protocol", response.status);
+          return response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        }
         const isProblem = /^application\/problem\+json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "");
         const problem = isProblem ? await response.json().catch(() => null) : null;
         throw new TransportError("http", response.status,
@@ -61,4 +64,17 @@ export function createTransport({
       finally { clearTimeout(timer); }
     },
   };
+}
+
+// The Auth SDK supplies its own headers; this transport never attaches a Savia bearer.
+export function authNetwork(origin: string): { fetch: typeof fetch } {
+  return { async fetch(input, init) {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    if (url.origin !== origin || !url.pathname.startsWith("/auth/v1/") || url.username || url.password) {
+      throw new TypeError("Invalid Supabase Auth destination");
+    }
+    const response = await expoFetch(url.href, { ...init, redirect: "error", credentials: "omit" });
+    if (response.redirected || (response.status >= 300 && response.status < 400)) throw new TransportError("redirect");
+    return response;
+  } };
 }

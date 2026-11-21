@@ -4,6 +4,12 @@ export type SessionCredentials = { accessToken: string; refreshToken: string };
 const key = "savia.session.v1";
 const options = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 
+export const secureStorage = {
+  getItem: (id: string) => SecureStore.getItemAsync(id, options),
+  setItem: (id: string, value: string) => SecureStore.setItemAsync(id, value, options),
+  removeItem: (id: string) => SecureStore.deleteItemAsync(id, options),
+};
+
 function selectCredentials(value: unknown): SessionCredentials | null {
   if (!value || typeof value !== "object") return null;
   const { accessToken, refreshToken } = value as Partial<SessionCredentials>;
@@ -14,16 +20,16 @@ function selectCredentials(value: unknown): SessionCredentials | null {
 
 export const sessionStore = {
   async read(): Promise<SessionCredentials | null> {
-    const value = await SecureStore.getItemAsync(key, options);
+    const value = await secureStorage.getItem(key);
     if (value === null) return null;
     try { return selectCredentials(JSON.parse(value)); } catch { return null; }
   },
   async write(session: SessionCredentials): Promise<void> {
     const credentials = selectCredentials(session);
     if (!credentials) throw new TypeError("Invalid session credentials");
-    await SecureStore.setItemAsync(key, JSON.stringify(credentials), options);
+    await secureStorage.setItem(key, JSON.stringify(credentials));
   },
   async clear(): Promise<void> {
-    await SecureStore.deleteItemAsync(key, options);
+    await secureStorage.removeItem(key);
   },
 };
