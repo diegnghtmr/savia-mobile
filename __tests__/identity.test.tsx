@@ -133,3 +133,29 @@ test("rejects retired currency before reading the session when enumeration is un
     Object.defineProperty(Intl, "supportedValuesOf", descriptor);
   }
 });
+
+test.each([
+  ["baseCurrency", true],
+  ["defaultCurrency", true],
+  ["baseCurrency", false],
+  ["defaultCurrency", false],
+] as const)("rejects retired onboarding %s before session access (enumeration=%s)", async (field, enumerates) => {
+  const { identity, read, send, newKey } = setup();
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf")!;
+  if (!enumerates) {
+    Object.defineProperty(Intl, "supportedValuesOf", { ...descriptor, value: undefined });
+  }
+
+  try {
+    await expect(identity.onboard({ ...draft, [field]: " DEM " }))
+      .rejects.toThrow("Revisa los datos de tu perfil.");
+    expect(read).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(newKey).not.toHaveBeenCalled();
+    expect(store.getItemAsync).not.toHaveBeenCalled();
+    expect(store.setItemAsync).not.toHaveBeenCalled();
+    expect(store.deleteItemAsync).not.toHaveBeenCalled();
+  } finally {
+    Object.defineProperty(Intl, "supportedValuesOf", descriptor);
+  }
+});
