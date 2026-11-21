@@ -2,7 +2,10 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import { Pressable, ScrollView, Text, TextInput, useColorScheme, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { Auth } from "../foundation/auth";
+import type { Identity } from "../foundation/identity";
+import { InvalidDraft, validEmail, workspaceUnavailable } from "../foundation/identity-draft";
 import { TransportError } from "../foundation/transport";
+import type { WorkspaceContext } from "../foundation/workspace-context";
 import { paletteFor } from "./tokens";
 
 export function AuthPanel({ children }: { children: ReactNode }) {
@@ -19,10 +22,34 @@ export function AuthAction({ label, action, disabled = false }: { label: string;
   </Pressable>;
 }
 
-type Route = "loading" | "sign-in" | "onboarding" | "home" | "retry";
-export function AuthGate({ auth, request, home }: { auth: () => Auth; request: (path: string, options: { successStatus: number }) => Promise<unknown>; home: ReactNode }) {
+const onboardingFields = [
+  ["email", "Correo electrónico", ""], ["displayName", "Nombre", ""], ["workspaceName", "Nombre del espacio personal", ""],
+  ["locale", "Idioma y región (ej. es-CO)", "es-CO"], ["countryCode", "País (código de dos letras)", "CO"], ["timezone", "Zona horaria (ej. America/Bogota)", "America/Bogota"],
+  ["dateFormat", "Fecha (DD/MM/YYYY, MM/DD/YYYY o YYYY-MM-DD)", "DD/MM/YYYY"], ["weekStartsOn", "Inicio de semana (0 domingo a 6 sábado)", "1"],
+  ["numberFormat", "Número (1.234,56 o 1,234.56)", "1.234,56"], ["defaultCurrency", "Moneda preferida", "COP"], ["baseCurrency", "Moneda del espacio", "COP"],
+] as const;
+const recoveryFields = [["name", "Nombre del espacio", ""], ["baseCurrency", "Moneda del espacio", "COP"]] as const;
+function DraftForm({ fields, label, submit, busy }: { fields: readonly (readonly [string, string, string])[]; label: string; submit: (values: unknown) => void; busy: boolean }) {
+  const colors = paletteFor(useColorScheme());
+  const [values, setValues] = useState(() => Object.fromEntries(fields.map(([id, , value]) => [id, value])));
+  return <>{fields.map(([id, name]) => <View key={id}>
+    <Text style={{ color: colors.text }}>{name}</Text>
+    <TextInput accessibilityLabel={name} editable={!busy} autoCapitalize="none" autoCorrect={false} value={values[id]} onChangeText={(value) => setValues((old) => ({ ...old, [id]: value }))} style={{ minHeight: 44, padding: 12, color: colors.text, backgroundColor: colors.raised }} />
+  </View>)}<AuthAction label={label} action={() => submit(values)} disabled={busy} /></>;
+}
+
+function RecoveryForm({ identity, busy, submit }: { identity: Identity; busy: boolean; submit: (operation: () => Promise<WorkspaceContext>) => void }) {
+  const [recover] = useState(() => identity.recovery());
+  return <DraftForm fields={recoveryFields} label="Crear espacio" busy={busy} submit={(values) => submit(() => recover(values))} />;
+}
+
+const unauthorized = (error: unknown) => error instanceof TransportError && error.kind === "http" && error.status === 401;
+type Route = "loading" | "sign-in" | "onboarding" | "workspace" | "retry";
+export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity: Identity; home: ReactNode }) {
   const colors = paletteFor(useColorScheme());
   const [route, setRoute] = useState<Route>("loading");
+  const [context, setContext] = useState<WorkspaceContext | null>(null);
+  const [choosing, setChoosing] = useState(false);
   const [signup, setSignup] = useState(false);
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
@@ -33,25 +60,33 @@ export function AuthGate({ auth, request, home }: { auth: () => Auth; request: (
   const check = useCallback(async () => {
     const id = ++sequence.current;
     setRoute("loading");
-    let next: Route = "home";
-    try { await request("/v1/me", { successStatus: 200 }); }
-    catch (error) {
-      const status = error instanceof TransportError && error.kind === "http" ? error.status : undefined;
-      next = status === 404 ? "onboarding" : status === 401 ? "sign-in" : "retry";
+    try {
+      const result = await identity.bootstrap();
+      if (id !== sequence.current) return;
+      setContext(result); setChoosing(false); setRoute(result ? "workspace" : "onboarding");
+    } catch (error) {
+      if (id === sequence.current) setRoute(unauthorized(error) ? "sign-in" : "retry");
     }
-    if (id === sequence.current) setRoute(next);
-  }, [request]);
+  }, [identity]);
   useEffect(() => { void check(); return () => { ++sequence.current; }; }, [check]);
 
   async function run(operation: () => Promise<void>, error: string) {
     if (submitting.current) return;
     submitting.current = true;
     setBusy(true); setNotice("");
-    try { await operation(); } catch { setNotice(error); }
-    finally { submitting.current = false; setBusy(false); }
+    try { await operation(); } catch (failure) {
+      if (unauthorized(failure)) { setContext(null); setRoute("sign-in"); }
+      else setNotice(failure instanceof InvalidDraft || (failure instanceof Error && failure.message === workspaceUnavailable) ? failure.message : error);
+    } finally { submitting.current = false; setBusy(false); }
   }
+  const changeWorkspace = (operation: () => Promise<WorkspaceContext>) => void run(async () => {
+    setContext(await operation()); setChoosing(false); setRoute("workspace");
+  }, "No pudimos guardar la configuración. Vuelve a intentarlo.");
   function submit() {
-    if (!email.trim() || !pass) return;
+    if (!validEmail(email.trim()) || !pass || pass.includes("\0") || (signup && pass.length < 6)) {
+      setNotice("Revisa el correo electrónico y la contraseña.");
+      return;
+    }
     const secret = pass;
     setPass("");
     void run(async () => {
@@ -64,10 +99,13 @@ export function AuthGate({ auth, request, home }: { auth: () => Auth; request: (
       await check();
     }, "No pudimos continuar. Verifica tus datos e inténtalo de nuevo.");
   }
-  const signOut = () => void run(async () => { await auth().signOut(); setRoute("sign-in"); }, "No pudimos cerrar la sesión.");
+  const signOut = () => void run(async () => { await auth().signOut(); setContext(null); setRoute("sign-in"); }, "No pudimos cerrar la sesión.");
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
-  if (route === "home") return <View style={{ flex: 1, backgroundColor: colors.canvas }}>{home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView></View>;
-  const title = route === "sign-in" ? (signup ? "Crear cuenta" : "Iniciar sesión") : route === "onboarding" ? "Completa tu perfil" : route === "retry" ? "No pudimos verificar tu perfil" : "Verificando tu perfil…";
+  if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
+    <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>
+    {home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
+  </View>;
+  const title = route === "sign-in" ? (signup ? "Crear cuenta" : "Iniciar sesión") : route === "onboarding" ? "Completa tu perfil" : route === "workspace" ? (context?.items.length ? "Elige un espacio" : "No tienes espacios disponibles") : route === "retry" ? "No pudimos verificar tu perfil" : "Verificando tu perfil…";
   const field = { minHeight: 44, padding: 12, backgroundColor: colors.raised, color: colors.text };
   const autofill = { signIn: "current-password", signUp: "new-password" } as const;
   return <AuthPanel>
@@ -78,7 +116,12 @@ export function AuthGate({ auth, request, home }: { auth: () => Auth; request: (
       <AuthAction label={signup ? "Registrarme" : "Ingresar"} action={submit} disabled={busy || !email.trim() || !pass} />
       <AuthAction label={signup ? "Volver a iniciar sesión" : "Crear una cuenta"} action={() => { setSignup(!signup); setPass(""); setNotice(""); }} disabled={busy} />
     </> : route === "retry" ? <AuthAction label="Reintentar" action={() => void check()} /> : route === "onboarding" ? <>
-      <Text style={{ color: colors.text }}>La configuración inicial todavía no está disponible.</Text>
+      <DraftForm fields={onboardingFields} label="Completar configuración" busy={busy} submit={(values) => changeWorkspace(() => identity.onboard(values))} />
+      <AuthAction label="Cerrar sesión" action={signOut} disabled={busy} />
+    </> : route === "workspace" && context ? <>
+      {context.items.length ? context.items.map(({ id, name }) => <AuthAction key={id} label={id === context.active?.id ? `${name} (activo)` : name} action={() => changeWorkspace(() => identity.select(id))} disabled={busy} />)
+        : <RecoveryForm identity={identity} busy={busy} submit={changeWorkspace} />}
+      {context.active && <AuthAction label="Volver al espacio activo" action={() => setChoosing(false)} disabled={busy} />}
       <AuthAction label="Cerrar sesión" action={signOut} disabled={busy} />
     </> : null}
     {noticeText}

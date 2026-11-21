@@ -4,6 +4,7 @@ import { HomeScreen } from "../src/app/index";
 import NotFoundScreen from "../src/app/+not-found";
 
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
+jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));
 
 jest.mock("react-native/Libraries/Utilities/useColorScheme", () => ({ default: jest.fn(() => "light") }));

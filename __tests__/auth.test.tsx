@@ -3,6 +3,7 @@ import { Text } from "react-native";
 import { createClient } from "@supabase/supabase-js";
 import * as SecureStore from "expo-secure-store";
 import { createAuth, type Auth } from "../src/foundation/auth";
+import { createIdentity } from "../src/foundation/identity";
 import { createTransport } from "../src/foundation/transport";
 import { AuthGate } from "../src/mobile-shell/auth-gate";
 
@@ -60,9 +61,14 @@ test.each(["sb_secret_fixture", "eyJhbGciOiJub25lIn0.eyJyb2xlIjoic2VydmljZV9yb2x
 
 function gate(status: number, authenticated = true) {
   const auth: Auth = { signIn: jest.fn(), signUp: jest.fn().mockResolvedValue(false), signOut: jest.fn(), refreshSession: jest.fn(), exchangeCode: jest.fn(), readSession: jest.fn().mockResolvedValue(authenticated ? { accessToken: "access-fixture", refreshToken: "refresh-fixture" } : null) };
-  const send = jest.fn().mockResolvedValue({ status, ok: status >= 200 && status < 300, redirected: false, headers: new Headers(), json: async () => ({ id: "profile" }) });
+  const id = "00000000-0000-4000-8000-000000000001";
+  jest.mocked(SecureStore.getItemAsync).mockResolvedValue(id);
+  const send = jest.fn(async (url: string) => {
+    const list = url.endsWith("/v1/workspaces");
+    return { status: list ? 200 : status, ok: list || (status >= 200 && status < 300), redirected: false, headers: new Headers(), json: async () => list ? { items: [{ id, name: "Casa" }], pageInfo: { hasNextPage: false } } : { id } };
+  });
   const api = createTransport({ baseUrl: "https://api.invalid", send, sessions: { read: auth.readSession } });
-  return { auth, send, view: <AuthGate auth={() => auth} request={api.request} home={<Text>Resumen protegido</Text>} /> };
+  return { auth, send, view: <AuthGate auth={() => auth} identity={createIdentity(api.withSession)} home={<Text>Resumen protegido</Text>} /> };
 }
 
 test.each([[200, "Resumen protegido"], [401, "Iniciar sesión"], [404, "Completa tu perfil"], [201, "Reintentar"], [302, "Reintentar"], [403, "Reintentar"], [503, "Reintentar"]] as const)("routes the direct /v1/me result %s to %s", async (status, label) => {
@@ -89,6 +95,21 @@ test("submits accessible sign-in, re-checks the profile, and offers sign-out", a
   await user.press(screen.getByRole("button", { name: "Cerrar sesión" }));
   expect(await screen.findByText("Iniciar sesión")).toBeTruthy();
   expect(auth.signOut).toHaveBeenCalledTimes(1);
+});
+
+test("rejects a malformed credential submission without reading or refreshing the session again", async () => {
+  const { view, auth, send } = gate(200, false);
+  await render(view);
+  await screen.findByText("Iniciar sesión");
+  await fireEvent.changeText(screen.getByLabelText("Correo electrónico"), "not-an-email");
+  await fireEvent.changeText(screen.getByLabelText("Contraseña"), input.password);
+  await fireEvent.press(screen.getByRole("button", { name: "Ingresar" }));
+  expect(await screen.findByText("Revisa el correo electrónico y la contraseña.")).toBeTruthy();
+  expect(auth.readSession).toHaveBeenCalledTimes(1);
+  expect(auth.signIn).not.toHaveBeenCalled();
+  expect(auth.refreshSession).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+  expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
 });
 
 test("registers with a protected password field and shows email confirmation without a session", async () => {

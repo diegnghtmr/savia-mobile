@@ -62,6 +62,32 @@ for (const [name, path, body, message] of [
   });
 }
 
+for (const [name, path, source, reason] of [
+  ["escaped network name", "src/app/example.ts",
+    String.raw`globalThis["f\u0065tch"]("https://fixture.invalid");`,
+    "network outside transport"],
+  ["escaped privileged key", "src/app/example.ts",
+    String.raw`const key = "sb_\u0073ecret_synthetic_fixture";`,
+    "embedded secret"],
+  ["privileged role literal", "src/app/example.ts",
+    'const role = "service_role";',
+    "privileged Supabase credential"],
+  ["split insecure URL", "src/app/example.ts",
+    'const url = "http:" + "//fixture.invalid";',
+    "insecure HTTP URL"],
+  ["escaped storage name", "src/app/example.ts",
+    String.raw`globalThis["local\u0053torage"].setItem("test", "synthetic");`,
+    "unapproved persistence"],
+  ["non-test script network call", "scripts/runtime.mjs",
+    'fetch("https://fixture.invalid");',
+    "network outside transport"],
+]) {
+  test(`rejects ${name}`, async (t) => {
+    const app = await fixture(t, { [path]: source });
+    await assert.rejects(audit(app), { message: `${path}: ${reason}` });
+  });
+}
+
 for (const path of ["requirements.txt", "CMakeLists.txt", "proof.md", "proof.mdx", "README.sh", "bundle.hbc"]) {
   test(`rejects unrelated scaffold artifacts: ${path}`, async (t) => {
     const app = await fixture(t, { [path]: "fixture\n" });

@@ -1,16 +1,15 @@
 import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, useWindowDimensions, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getAuth } from "../foundation/auth";
+import { createIdentity } from "../foundation/identity";
 import { createTransport } from "../foundation/transport";
 import { AuthGate } from "../mobile-shell/auth-gate";
 import { paletteFor } from "../mobile-shell/tokens";
 
-function request(path: string, options: { successStatus: number }) {
-  return createTransport({ sessions: { read: () => getAuth().readSession() } }).request(path, options);
-}
+const identity = createIdentity((operation) => createTransport({ sessions: { read: () => getAuth().readSession() } }).withSession(operation));
 
 export default function Index() {
-  return <AuthGate auth={getAuth} request={request} home={<HomeScreen />} />;
+  return <AuthGate auth={getAuth} identity={identity} home={<HomeScreen />} />;
 }
 
 export function HomeScreen() {

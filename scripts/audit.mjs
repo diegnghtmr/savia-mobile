@@ -11,7 +11,7 @@ const testFile = /(?:^|\/)__tests__\/|(?:^|\/)jest\.setup\.ts$|\.(?:test|spec)\.
 const network = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|axios|superagent)\b/i;
 const supabase = /@supabase\/[\w-]+/gi;
 const plainStorage = /\b(?:async-storage|AsyncStorage|localStorage|sessionStorage|expo-file-system|react-native-fs|react-native-mmkv|expo-sqlite)\b|["'](?:node:)?fs(?:\/promises)?["']/i;
-const serviceKey = /\b\w*(?:supabase\w*(?:service_?role|service_?key|secret_?key)|service_?role_?key)\w*\b/i;
+const serviceKey = /\b\w*(?:supabase\w*(?:service_?role|service_?key|secret_?key)|service_?role_?key)\w*\b|["'`]service_role["'`]/i;
 const secret = /\b(?:sb_secret_[\w-]+|svt_[\w-]{16,}|eyJ[\w-]+\.[\w-]+\.[\w-]+|sk_(?:live|test)_[\w-]+)\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:pass(?:word|wd)|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization)["']?\s*[:=]\s*["'`][^"'`\r\n]+["'`]/i;
 
 async function walk(dir) {
@@ -23,10 +23,17 @@ async function walk(dir) {
   }))).flat();
 }
 
+function normalizeEscapes(text) {
+  return text.replace(/\\u(?:\{([\da-f]{1,6})\}|([\da-f]{4}))|\\x([\da-f]{2})/gi, (match, braced, unicode, hex) => {
+    const code = Number.parseInt(braced ?? unicode ?? hex, 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : match;
+  });
+}
+
 function findInsecureUrl(path, text) {
   const tree = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
   function check(node) {
-    if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) && /http:\/\//i.test(node.text)) {
+    if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && /http:/i.test(node.text)) {
       const parent = node.parent;
       const guarded = path === "src/foundation/config.ts" && ts.isConditionalExpression(parent) &&
         parent.whenTrue === node && parent.condition.getText(tree) === "__DEV__";
@@ -45,8 +52,9 @@ export async function audit(target = root, parent = join(target, "..")) {
   if (files.some((path) => artifact.test(path))) throw new Error("generated or documentation-like executable path rejected");
   for (const path of files) {
     if (!sourceFile.test(path) || testFile.test(path) || path === "scripts/audit.mjs") continue;
-    const text = await readFile(join(target, path), "utf8");
-    const appCode = !path.startsWith("scripts/") && !path.endsWith(".json");
+    const source = await readFile(join(target, path), "utf8");
+    const text = normalizeEscapes(source);
+    const appCode = !path.endsWith(".json");
     const appDependency = path === "package.json";
     const reject = (message) => { throw new Error(`${path}: ${message}`); };
     if (serviceKey.test(text)) reject("privileged Supabase credential");
@@ -57,7 +65,7 @@ export async function audit(target = root, parent = join(target, "..")) {
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
     if ((appCode || appDependency) && plainStorage.test(text)) reject("unapproved persistence");
-    if (findInsecureUrl(path, text)) reject("insecure HTTP URL");
+    if (findInsecureUrl(path, source)) reject("insecure HTTP URL");
   }
   return { paths: files.length };
 }

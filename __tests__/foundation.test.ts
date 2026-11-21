@@ -1,7 +1,8 @@
 import * as SecureStore from "expo-secure-store";
+import { fetch as expoFetch } from "expo/fetch";
 import { readApiOrigin } from "../src/foundation/config";
 import { sessionStore } from "../src/foundation/session-store";
-import { createTransport } from "../src/foundation/transport";
+import { authNetwork, createTransport } from "../src/foundation/transport";
 
 jest.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1,
@@ -80,7 +81,8 @@ test("does not send a protected request without a session", async () => {
 
 test("maps problem JSON without trusting its status or echoing its detail", async () => {
   const { client } = setup(404, { status: 200, code: "profile_not_found", traceId: "trace-fixture", detail: "private" }, "application/problem+json; charset=utf-8");
-  await expect(client.request("/v1/me")).rejects.toMatchObject({ kind: "http", status: 404, code: "profile_not_found", traceId: "trace-fixture", message: "Savia API request failed" });
+  const error = await client.request("/v1/me").catch((value: unknown) => value);
+  expect(JSON.parse(JSON.stringify(error))).toEqual({ kind: "http", status: 404, code: "profile_not_found", message: "Savia API request failed" });
 });
 
 test("rejects a redirect response before consuming its body", async () => {
@@ -94,4 +96,40 @@ test("aborts and times out even if response parsing never settles", async () => 
   response.json.mockImplementation(() => new Promise(() => {}));
   await expect(client.request("/v1/me")).rejects.toMatchObject({ kind: "timeout" });
   expect(send.mock.calls[0]?.[1].signal?.aborted).toBe(true);
+});
+
+test("aborts and settles a stalled Supabase Auth request", async () => {
+  jest.useFakeTimers();
+  try {
+    const send = jest.mocked(expoFetch);
+    send.mockImplementationOnce(() => new Promise(() => {}));
+    const origin = "https://identity.invalid";
+    const settled = jest.fn();
+    void authNetwork(origin).fetch(`${origin}/auth/v1/token`).then(settled, settled);
+
+    await jest.advanceTimersByTimeAsync(60_000);
+
+    expect(send.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(settled).toHaveBeenCalledTimes(1);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("does not expose the bearer in serialized problem metadata", async () => {
+  const token = credentials.accessToken;
+  const { client } = setup(
+    422,
+    { status: 404, code: token, traceId: token, detail: token },
+    "application/problem+json",
+  );
+
+  const error = await client.request("/v1/me").catch((value: unknown) => value);
+
+  expect(error).toMatchObject({
+    kind: "http",
+    status: 422,
+    message: "Savia API request failed",
+  });
+  expect(JSON.stringify(error)).not.toContain(token);
 });
