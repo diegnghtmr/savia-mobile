@@ -106,3 +106,30 @@ test("renders the onboarding form and rejects incomplete submission without a ne
   expect(read).toHaveBeenCalledTimes(1); expect(send).toHaveBeenCalledTimes(1);
   expect(store.setItemAsync).not.toHaveBeenCalled();
 });
+
+test("rejects retired currency before reading the session when enumeration is unavailable", async () => {
+  const { identity, read, send, newKey } = setup();
+  send.mockResolvedValueOnce(reply({ id: profile }))
+    .mockResolvedValueOnce(reply(page([])))
+    .mockResolvedValueOnce(reply({}, 422));
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf")!;
+  Object.defineProperty(Intl, "supportedValuesOf", { ...descriptor, value: undefined });
+  try {
+    const error = await identity.recovery()({ name: "Casa", baseCurrency: "DEM" })
+      .catch((failure: Error) => failure);
+    expect({
+      message: error instanceof Error ? error.message : undefined,
+      sessionReads: read.mock.calls.length,
+      requests: send.mock.calls.map(([url, init]) => [init.method, url, init.body]),
+      keys: newKey.mock.calls.length,
+    }).toEqual({
+      message: "Revisa el nombre y la moneda base del espacio.",
+      sessionReads: 0,
+      requests: [],
+      keys: 0,
+    });
+    expect(store.setItemAsync).not.toHaveBeenCalled();
+  } finally {
+    Object.defineProperty(Intl, "supportedValuesOf", descriptor);
+  }
+});

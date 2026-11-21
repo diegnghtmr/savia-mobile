@@ -1,3 +1,4 @@
+import { ACTIVE_CURRENCIES } from "./currencies";
 export class InvalidDraft extends Error {}
 export const workspaceUnavailable = "Este espacio ya no está disponible.";
 
@@ -27,9 +28,7 @@ function name(value: string) {
 function currency(value: string) {
   const code = value.toUpperCase();
   if (!/^[A-Z]{3}$/.test(code)) throw new TypeError();
-  // Some native Intl builds lack the currency enumeration API.
-  const known = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("currency").includes(code)
-    : !["XXX", "XTS"].includes(code) && Intl.NumberFormat("en", { style: "currency", currency: code, currencyDisplay: "name" }).formatToParts(0).some((part) => part.type === "currency" && part.value !== code);
+  const known = ACTIVE_CURRENCIES.has(code);
   if (!known) throw new TypeError();
   return code;
 }
