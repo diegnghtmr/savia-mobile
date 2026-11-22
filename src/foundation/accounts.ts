@@ -1,5 +1,6 @@
 import { randomUUID } from "expo-crypto";
 import { ACTIVE_CURRENCIES } from "./currencies";
+import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
 import { TransportError, type createTransport } from "./transport";
 import { uuid } from "./workspace-context";
@@ -18,7 +19,6 @@ const record = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 const member = <T extends object>(values: T, key: unknown): key is keyof T => typeof key === "string" && Object.hasOwn(values, key);
-const isCursor = (value: unknown): value is string => typeof value === "string" && /^[\w-]{1,256}$/.test(value);
 const isDay = (value: string) => /^(?!0000)\d{4}-\d{2}-\d{2}$/.test(value) && new Date(`${value}T00:00:00Z`).toJSON()?.slice(0, 10) === value;
 const zero = new Set("BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF".split(" "));
 const three = new Set("BHD IQD JOD KWD LYD OMR TND".split(" "));

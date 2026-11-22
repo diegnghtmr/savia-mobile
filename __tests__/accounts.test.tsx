@@ -10,6 +10,7 @@ jest.mock("expo-crypto", () => ({ randomUUID: jest.fn() }));
 
 const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
 const workspace = id(1);
+const nextAccountCursor = Buffer.from(JSON.stringify(["2026-02-20T10:11:11.000000Z", id(2)])).toString("base64url");
 const account = { id: id(2), name: "Ahorros", type: "savings", status: "active", currency: "USD", includeInNetWorth: true, updatedAt: "2026-02-20T10:11:11Z", createdAt: "2026-02-20T10:11:11Z", version: 1 };
 const original = { amountMinor: "900719925474099301", currency: "USD" };
 const balance = {
@@ -51,7 +52,7 @@ function setup({ omitETag = false, loseCloseResponse = false } = {}) {
       if (failCreate) { failCreate = false; return reply({}, 503); }
       return reply(account, 201);
     }
-    if (parsed.pathname === "/v1/accounts") return reply({ items: parsed.searchParams.has("cursor") ? [] : [current], pageInfo: { hasNextPage: !parsed.searchParams.has("cursor"), nextCursor: parsed.searchParams.has("cursor") ? null : "opaque_1" } });
+    if (parsed.pathname === "/v1/accounts") return reply({ items: parsed.searchParams.has("cursor") ? [] : [current], pageInfo: { hasNextPage: !parsed.searchParams.has("cursor"), nextCursor: parsed.searchParams.has("cursor") ? null : nextAccountCursor } });
     if (parsed.pathname.endsWith("/balance")) return reply(balance);
     return reply(current, 200, omitETag ? undefined : etag());
   });
@@ -63,7 +64,7 @@ function setup({ omitETag = false, loseCloseResponse = false } = {}) {
 
 test("validates repeated or malformed params and create fields before accessing session or storage", async () => {
   const { api, read, send, newKey } = setup();
-  for (const query of [{ status: ["active", "closed"] }, { status: "unknown" }, { cursor: ["opaque_1"] }, { cursor: "\n" }, { limit: ["2", "3"] }, { limit: "201" }, { status: "" }, { force: true }]) await expect(api.list(query)).rejects.toThrow("Filtros de cuentas no válidos.");
+  for (const query of [{ status: ["active", "closed"] }, { status: "unknown" }, { cursor: [nextAccountCursor] }, { cursor: "\n" }, { limit: ["2", "3"] }, { limit: "201" }, { status: "" }, { force: true }]) await expect(api.list(query)).rejects.toThrow("Filtros de cuentas no válidos.");
   await expect(api.list(new URLSearchParams("status=active&status=closed"))).rejects.toThrow("Filtros de cuentas no válidos.");
   await expect(api.detail([account.id, account.id])).rejects.toThrow("Cuenta no válida.");
   for (const bad of [{ name: ["Caja", "Caja"] }, { type: "wrong" }, { currency: "ZZZ" }, { openingBalance: ["1"] }, { openingBalance: "1.234" }, { openingBalance: "1e3" }, { openingBalance: "-92233720368547758.08" }, { openingBalanceDate: "2026-02-20" }, { openingBalance: "1", openingBalanceDate: "2025-02-29" }]) {
@@ -75,9 +76,9 @@ test("validates repeated or malformed params and create fields before accessing 
 
 test("keeps status with the opaque cursor, reads exact balances and never sends a revoked workspace header", async () => {
   const { api, send, calls, revoke } = setup();
-  await expect(api.list({ status: "active", limit: "2" })).resolves.toMatchObject({ items: [{ id: account.id, name: "Ahorros", status: "active", balance: "9007199254740993,01 USD" }], nextCursor: "opaque_1" });
-  await expect(api.list({ status: "active", limit: "2", cursor: "opaque_1" })).resolves.toEqual({ items: [], nextCursor: null });
-  expect(calls().map(([url]) => url)).toEqual([`https://api.invalid/v1/accounts?limit=2&status=active`, `https://api.invalid/v1/accounts/${account.id}/balance`, `https://api.invalid/v1/accounts?limit=2&status=active&cursor=opaque_1`]);
+  await expect(api.list({ status: "active", limit: "2" })).resolves.toMatchObject({ items: [{ id: account.id, name: "Ahorros", status: "active", balance: "9007199254740993,01 USD" }], nextCursor: nextAccountCursor });
+  await expect(api.list({ status: "active", limit: "2", cursor: nextAccountCursor })).resolves.toEqual({ items: [], nextCursor: null });
+  expect(calls().map(([url]) => url)).toEqual([`https://api.invalid/v1/accounts?limit=2&status=active`, `https://api.invalid/v1/accounts/${account.id}/balance`, `https://api.invalid/v1/accounts?limit=2&status=active&cursor=${nextAccountCursor}`]);
   for (const [url, init] of send.mock.calls) {
     const headers = new Headers(init.headers);
     expect(headers.get("X-Workspace-Id")).toBe(url.includes("/v1/accounts") ? workspace : null);
@@ -112,7 +113,7 @@ test("renders a filtered accessible list, detail buckets and FX provenance witho
   await render(<AccountsScreen api={api} back={jest.fn()} />);
   await fireEvent.press(await screen.findByRole("button", { name: "Activas" }));
   await fireEvent.press(await screen.findByRole("button", { name: "Cargar más" }));
-  expect(calls().some(([url]) => url.endsWith("status=active&cursor=opaque_1"))).toBe(true);
+  expect(calls().some(([url]) => url.endsWith(`status=active&cursor=${nextAccountCursor}`))).toBe(true);
   await fireEvent.press(await screen.findByRole("button", { name: "Ahorros" }));
   expect(await screen.findByText("Saldo confirmado: 9007199254740993,01 USD")).toBeTruthy();
   expect(screen.getByText("Saldo pendiente: −0,05 USD")).toBeTruthy();
@@ -162,31 +163,44 @@ test("rejects repeated, malformed or unconfirmed account mutations before sessio
   expect(current()).toMatchObject({ name: "Ahorros", status: "active", version: 1 });
 });
 
-test("keeps the edit draft after a stale ETag without overwriting, then saves only after an explicit reload", async () => {
+test("reloads after a stale ETag without dropping or submitting the draft", async () => {
   const { api, current, writes, remoteEdit } = setup();
   await openDetail(api);
   await press("Editar cuenta");
   await fireEvent.changeText(screen.getByLabelText("Nombre de la cuenta"), "Mi edición");
   remoteEdit();
   await press("Guardar cambios");
+
   expect(await screen.findByRole("alert")).toHaveTextContent(conflict);
   expect(screen.getByDisplayValue("Mi edición")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Guardar cambios" })).toBeDisabled();
-  expect(current()).toMatchObject({ name: "Cambio remoto", version: 2 });
   expect(writes()).toHaveLength(1);
-  expect(new Headers(writes()[0][1].headers).get("If-Match")).toBe('"1"');
+  expect(current()).toMatchObject({ name: "Cambio remoto", version: 2 });
+
   await press("Recargar cuenta");
   await screen.findByRole("header", { name: "Cambio remoto" });
+  if (screen.queryByRole("button", { name: "Editar cuenta" })) await press("Editar cuenta");
+  expect(screen.getByLabelText("Nombre de la cuenta")).toHaveProp("value", "Mi edición");
+  expect(writes()).toHaveLength(1);
+
+  await press("Guardar cambios");
+  await screen.findByRole("header", { name: "Mi edición" });
+  expect(writes()).toHaveLength(2);
+  expect(new Headers(writes()[1][1].headers).get("If-Match")).toBe('"2"');
+  expect(JSON.parse(String(writes()[1][1].body))).toEqual({ name: "Mi edición" });
+});
+
+test("still saves normalized metadata and clears nullable fields", async () => {
+  const { api, current, writes } = setup();
+  await openDetail(api);
   await press("Editar cuenta");
-  expect(screen.getByDisplayValue("Cambio remoto")).toBeTruthy();
   await fireEvent.changeText(screen.getByLabelText("Nombre de la cuenta"), " Caja ");
   await fireEvent.changeText(screen.getByLabelText("Institución"), "");
   await press("Incluir en el patrimonio");
   await press("Guardar cambios");
   await screen.findByRole("header", { name: "Caja" });
-  const [url, init] = writes()[1];
-  expect([new URL(url).pathname, init.method, new Headers(init.headers).get("If-Match"), JSON.parse(String(init.body))]).toEqual([`/v1/accounts/${account.id}`, "PATCH", '"2"', { name: "Caja", institution: null, includeInNetWorth: false }]);
-  expect(current()).toMatchObject({ name: "Caja", institution: null, includeInNetWorth: false, version: 3 });
+  const [url, init] = writes()[0];
+  expect([new URL(url).pathname, init.method, new Headers(init.headers).get("If-Match"), JSON.parse(String(init.body))]).toEqual([`/v1/accounts/${account.id}`, "PATCH", '"1"', { name: "Caja", institution: null, includeInNetWorth: false }]);
+  expect(current()).toMatchObject({ name: "Caja", institution: null, includeInNetWorth: false, version: 2 });
 });
 
 test("archives and reactivates using the current ETag and a status-only patch", async () => {
@@ -236,4 +250,28 @@ test("checks fresh workspace membership before each write, with no workspace hea
     ["/v1/me", null], ["/v1/workspaces", null], ["/v1/me", null], ["/v1/workspaces", null],
   ]);
   expect(current()).toMatchObject({ status: "archived", version: 2 });
+});
+
+test.each(["a", "W10"])("rejects semantically invalid cursor %s before session access", async (cursor) => {
+  const { api, read, send, newKey } = setup();
+  await expect(api.list({ status: "active", cursor }))
+    .rejects.toThrow("Filtros de cuentas no válidos.");
+  expect(read).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+  expect(newKey).not.toHaveBeenCalled();
+  expect(secure.getItemAsync).not.toHaveBeenCalled();
+  expect(secure.setItemAsync).not.toHaveBeenCalled();
+});
+
+test("does not offer load-more when the server supplies an invalid cursor", async () => {
+  const { api, send, calls } = setup();
+  send.mockResolvedValueOnce(reply({ id: id(3) }))
+    .mockResolvedValueOnce(reply({ items: [{ id: workspace, name: "Casa" }], pageInfo: { hasNextPage: false } }))
+    .mockResolvedValueOnce(reply({ items: [account], pageInfo: { hasNextPage: true, nextCursor: "a" } }));
+
+  await render(<AccountsScreen api={api} back={jest.fn()} />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos cargar las cuentas.");
+  expect(screen.queryByRole("button", { name: "Cargar más" })).toBeNull();
+  expect(calls()).toHaveLength(1);
 });

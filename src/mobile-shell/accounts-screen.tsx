@@ -59,7 +59,7 @@ function Detail({ api, id, back }: { api: Accounts; id: string; back: () => void
     void api.detail(id).then((value) => { if (current) setData(value); }, () => { if (current) setData(null); });
     return () => { current = false; };
   }, [api, id, attempt]);
-  if (data) return <LoadedDetail key={attempt} api={api} data={data} back={back} reload={reload} />;
+  if (data) return <LoadedDetail key={attempt} api={api} data={data} back={back} reload={reload} replace={setData} />;
   return <>
     <AuthAction label="Volver a cuentas" action={back} />
     {data === null ? <><Copy role="alert">No pudimos cargar la cuenta.</Copy><AuthAction label="Reintentar" action={reload} /></> : <Copy>Cargando cuenta…</Copy>}
@@ -68,7 +68,7 @@ function Detail({ api, id, back }: { api: Accounts; id: string; back: () => void
 
 const editFields = ["name", "institution", "maskedNumber", "description"] as const;
 type MetadataDraft = Partial<Record<typeof editFields[number], string> & { includeInNetWorth: boolean }>;
-function LoadedDetail({ api, data, back, reload }: { api: Accounts; data: AccountDetail; back: () => void; reload: () => void }) {
+function LoadedDetail({ api, data, back, reload, replace }: { api: Accounts; data: AccountDetail; back: () => void; reload: () => void; replace: (data: AccountDetail) => void }) {
   const { account, editable, confirmed, pending, available, reconciled, equivalent } = data;
   const colors = paletteFor(useColorScheme());
   const [mode, setMode] = useState<"detail" | "edit" | "close">("detail");
@@ -78,7 +78,18 @@ function LoadedDetail({ api, data, back, reload }: { api: Accounts; data: Accoun
   const lock = useRef(false);
   const changeMode = (next: typeof mode) => { setMode(next); setFailure(undefined); setDraft({}); };
   const original: MetadataDraft = { name: account.name, ...Object.fromEntries(account.metadata), includeInNetWorth: editable?.includeInNetWorth };
-  const changes = Object.fromEntries(Object.entries(draft).filter(([key, value]) => (original[key as keyof MetadataDraft] ?? "") !== value));
+  const changes: MetadataDraft = Object.fromEntries(Object.entries(draft).filter(([key, value]) => (original[key as keyof MetadataDraft] ?? "") !== value));
+  async function refreshConflict() {
+    if (lock.current) return;
+    lock.current = true; setBusy(true);
+    try {
+      const latest = await api.detail(account.id);
+      setDraft(changes);
+      replace(latest);
+      setFailure(undefined);
+    } catch { setFailure({ conflict: true, message: "No pudimos recargar la cuenta. Vuelve a intentarlo." }); }
+    finally { lock.current = false; setBusy(false); }
+  }
   async function mutate(command: "edit" | "status" | "close") {
     if (!editable || failure?.conflict || lock.current) return;
     lock.current = true; setBusy(true); setFailure(undefined);
@@ -122,7 +133,7 @@ function LoadedDetail({ api, data, back, reload }: { api: Accounts; data: Accoun
       <AuthAction label="Cerrar cuenta" action={() => changeMode("close")} disabled={blocked} />
     </>)}
     {failure && <Copy role="alert">{failure.message}</Copy>}
-    {failure?.conflict && <AuthAction label="Recargar cuenta" action={reload} />}
+    {failure?.conflict && <AuthAction label="Recargar cuenta" action={() => void refreshConflict()} disabled={busy} />}
   </>;
 }
 
