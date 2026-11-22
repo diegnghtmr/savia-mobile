@@ -1,12 +1,12 @@
 import type { ScopedRequest } from "./accounts";
 import type { Identity } from "./identity";
 import { workspaceUnavailable } from "./identity-draft";
-import { atomic, offlineStore } from "./offline-db";
+import { atomic, OfflineStorageUnavailable, offlineStore } from "./offline-db";
 import { createOutbox } from "./outbox";
 import { isOfflineFailure } from "./transport";
 import type { WorkspaceContext } from "./workspace-context";
 
-const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|categories|payees|tags)(?:\?|$)/i;
+const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|categories|payees|tags)(?:\?|$)/i;
 const optional = <T>(operation: Promise<T>) => operation.catch(() => null);
 
 export function createOffline(identity: Identity, principal: () => Promise<string | null>) {
@@ -16,16 +16,30 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
     return row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
   });
-  const remember = (owner: string, context: WorkspaceContext | null, ticket: number) => optional(store(async (db) => {
+  const remember = (owner: string, context: WorkspaceContext | null, ticket: number, expected?: string) => store(async (db) => {
     if (ticket !== epoch) return;
+    const publish = async (value: WorkspaceContext | null) => {
+      if (value) await db.runAsync("INSERT OR REPLACE INTO membership VALUES (?, ?, ?)", owner, value.profileId, JSON.stringify(value));
+      else await db.runAsync("DELETE FROM membership WHERE principal = ?", owner);
+    };
+    const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
+    const before = row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
+    const stillAllowed = before?.profileId === context?.profileId
+      ? context?.items.filter(({ id }) => before?.items.some((item) => item.id === id)) ?? [] : [];
+    // Commit revocation before any fallible purge. A regrant cannot reactivate old rows until their purge succeeds.
+    if (before && stillAllowed.length < before.items.length) await publish({ ...before, items: stillAllowed,
+      active: stillAllowed.find(({ id }) => id === before.active?.id) ?? null });
     await atomic(db, async () => {
       for (const table of ["cache", "outbox"]) await db.runAsync(
         `DELETE FROM ${table} WHERE principal = ? AND (profile <> ? OR workspace NOT IN (SELECT value FROM json_each(?)))`,
-        owner, context?.profileId ?? "", JSON.stringify(context?.items.map(({ id }) => id) ?? []));
-      if (context) await db.runAsync("INSERT OR REPLACE INTO membership VALUES (?, ?, ?)", owner, context.profileId, JSON.stringify(context));
-      else await db.runAsync("DELETE FROM membership WHERE principal = ?", owner);
+        owner, context?.profileId ?? "", JSON.stringify(stillAllowed.map(({ id }) => id)));
+      await publish(context);
     });
-  }));
+  }).catch((error: unknown) => {
+    if (error instanceof OfflineStorageUnavailable) return;
+    if (expected && !context?.items.some(({ id }) => id === expected)) throw new Error(workspaceUnavailable, { cause: error });
+    throw error;
+  });
   async function verified<T extends WorkspaceContext | null>(operation: () => Promise<T>, fallback = false): Promise<T> {
     const ticket = epoch, owner = await optional(principal());
     const current = async () => owner !== null && ticket === epoch && await optional(principal()) === owner;
@@ -52,17 +66,13 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       onboard: (input: unknown) => verified(() => identity.onboard(input)),
       recovery: () => { const recover = identity.recovery(); return (input: unknown) => verified(() => recover(input)); },
     },
-    async beforeSignOut() {
-      ++epoch;
+    async signOut(operation: () => Promise<void>) {
       const owner = await optional(principal());
-      await optional(store((db) => atomic(db, async () => {
-        for (const table of ["cache", "outbox", "membership"]) {
-          if (owner) await db.runAsync(`DELETE FROM ${table} WHERE principal = ?`, owner);
-          else await db.runAsync(`DELETE FROM ${table}`);
-        }
-      })));
+      await operation();
+      ++epoch;
+      await remember(owner ?? "", null, epoch);
     },
-    scope(profile: string, workspace: string, request: ScopedRequest, onSnapshot: (at: number) => void): ScopedRequest {
+    scope(profile: string, workspace: string, request: ScopedRequest, onSnapshot: (at: number) => void, onFresh?: () => void): ScopedRequest {
       const ticket = epoch;
       return async (expected, path, options) => {
         if (ticket !== epoch || expected !== workspace) throw new Error(workspaceUnavailable);
@@ -72,7 +82,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
         const current = async () => owner !== null && ticket === epoch && await optional(principal()) === owner;
         try {
           const payload = await request(workspace, path, { ...options, expectedProfile: profile, onMembership: async (context) => {
-            if (owner && await current()) await remember(owner, context, ticket);
+            if (owner && await current()) await remember(owner, context, ticket, workspace);
             if (ticket !== epoch) throw new Error(workspaceUnavailable);
           } });
           if (owner && read && await current()) await optional(store(async (db) => {
@@ -83,6 +93,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
             await db.runAsync(`DELETE FROM cache WHERE rowid IN (SELECT rowid FROM cache WHERE principal = ? AND profile = ? AND workspace = ?
               ORDER BY saved_at DESC, rowid DESC LIMIT -1 OFFSET 100)`, owner, profile, workspace);
           }));
+          if (read && ticket === epoch) onFresh?.();
           return payload;
         } catch (error) {
           if (owner && read && isOfflineFailure(error) && await current()) {

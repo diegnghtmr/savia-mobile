@@ -17,6 +17,7 @@ const profile = "00000000-0000-4000-8000-000000000010", otherProfile = "00000000
 const first = { id: "00000000-0000-4000-8000-000000000020", name: "Casa" };
 const second = { id: "00000000-0000-4000-8000-000000000021", name: "Trabajo" };
 const accounts = "/v1/accounts?limit=20", movements = "/v1/transactions?limit=20", tags = "/v1/tags?limit=200";
+const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`];
 
 function setup() {
   let online = true, denied = false, workspaces = [first, second], owner = profile;
@@ -41,12 +42,12 @@ beforeEach(() => {
   jest.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => { saved.delete(key); });
 });
 
-test("cold offline restart reads only saved accounts, movements and catalogs and presents their saved date", async () => {
+test("cold offline restart reads only saved accounts, movements, budgets and catalogs and presents their saved date", async () => {
   const fx = setup(), local = fx.reopen();
   await local.identity.select(first.id);
   const show = jest.fn();
   const scoped = local.scope(profile, first.id, fx.api.requestInWorkspace, show);
-  await Promise.all([accounts, movements, tags].map((path) => scoped(first.id, path)));
+  await Promise.all(recent.map((path) => scoped(first.id, path)));
   expect(show).not.toHaveBeenCalled();
   expect([...saved.values()].filter((value) => /^[a-f0-9]{64}$/.test(value))).toHaveLength(1);
   fx.setOnline(false); fx.send.mockClear();
@@ -56,7 +57,7 @@ test("cold offline restart reads only saved accounts, movements and catalogs and
     const [date, setDate] = useState<number | null>(null), [paths, setPaths] = useState<string[]>([]);
     useEffect(() => {
       const request = restarted.scope(profile, first.id, fx.api.requestInWorkspace, setDate);
-      void Promise.all([accounts, movements, tags].map((path) => request(first.id, path)))
+      void Promise.all(recent.map((path) => request(first.id, path)))
         .then((rows) => setPaths(rows.map((row) => (row as { path: string }).path)), () => setPaths(["No guardado"]));
     }, []);
     return <><OfflineBanner savedAt={date} />{paths.map((path) => <Text key={path}>{path}</Text>)}</>;
@@ -64,7 +65,7 @@ test("cold offline restart reads only saved accounts, movements and catalogs and
   await render(<Screen />);
   await act(async () => {});
   expect(await screen.findByRole("alert", { name: /Sin conexión — datos guardados el .+/ })).toBeTruthy();
-  for (const path of [accounts, movements, tags]) expect(screen.getByText(path)).toBeTruthy();
+  for (const path of recent) expect(screen.getByText(path)).toBeTruthy();
   expect(fx.send.mock.calls.every(([url]) => url.endsWith("/v1/me"))).toBe(true);
   expect([...saved.values()].filter((value) => /^[a-f0-9]{64}$/.test(value))).toHaveLength(1);
 });
@@ -100,7 +101,7 @@ test("verified removal and sign-out wipe the corresponding reads, even after rej
   fx.setOnline(false);
   await expect(read(first.id, accounts)).rejects.toThrow();
   await expect(secondRead(second.id, accounts)).resolves.toMatchObject({ workspace: second.id });
-  await local.beforeSignOut();
+  await local.signOut(async () => {});
   const restarted = fx.reopen();
   await expect(restarted.identity.bootstrap()).rejects.toThrow();
   await expect(secondRead(second.id, accounts)).rejects.toThrow();
@@ -117,4 +118,23 @@ test("without native SQLCipher online reads work but offline storage fails close
   fx.setOnline(false);
   await expect(read(first.id, accounts)).rejects.toThrow();
   expect(stale).not.toHaveBeenCalled();
+});
+
+// Reviewer regression (verify mwr70vb0). Append to __tests__/offline-cache.test.tsx.
+import { offlineStore } from "../src/foundation/offline-db";
+
+test("verified removal cannot fall back to revoked data when SQLite refuses the purge", async () => {
+  const fx = setup(), local = fx.reopen();
+  await local.identity.select(first.id);
+  const read = local.scope(profile, first.id, fx.api.requestInWorkspace, jest.fn());
+  await expect(read(first.id, accounts)).resolves.toMatchObject({ workspace: first.id });
+  await offlineStore()(db => db.execAsync(
+    "CREATE TRIGGER fail_cache_delete BEFORE DELETE ON cache BEGIN SELECT RAISE(ABORT,'write failed'); END",
+  ));
+  fx.removeFirst();
+  await expect(read(first.id, accounts)).rejects.toThrow("Este espacio ya no está disponible.");
+  fx.setOnline(false);
+  const restarted = fx.reopen();
+  await expect(restarted.scope(profile, first.id, fx.api.requestInWorkspace, jest.fn())(first.id, accounts)).rejects.toThrow();
+  await expect(restarted.identity.bootstrap()).rejects.toThrow();
 });

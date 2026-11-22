@@ -24,7 +24,12 @@ const migrations = [
   `CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL,
      path TEXT NOT NULL, body TEXT NOT NULL, slot TEXT NOT NULL, key TEXT NOT NULL, queued_at INTEGER NOT NULL,
      record TEXT, issue TEXT, UNIQUE (principal, profile, workspace, slot));`,
+  `ALTER TABLE outbox ADD COLUMN legacy_slot TEXT;
+   UPDATE outbox SET legacy_slot = slot;
+   CREATE UNIQUE INDEX outbox_legacy ON outbox (principal, profile, workspace, legacy_slot);`,
 ];
+
+export class OfflineStorageUnavailable extends Error {}
 
 export async function atomic<T>(db: SQLiteDatabase, operation: () => Promise<T>) {
   await db.execAsync("BEGIN IMMEDIATE");
@@ -36,7 +41,8 @@ export async function atomic<T>(db: SQLiteDatabase, operation: () => Promise<T>)
 }
 
 async function open() {
-  const db = await openDatabaseAsync("savia-offline.db", { useNewConnection: true });
+  const db = await openDatabaseAsync("savia-offline.db", { useNewConnection: true })
+    .catch(() => { throw new OfflineStorageUnavailable("Encrypted offline storage unavailable"); });
   try {
     if (!(await db.getFirstAsync<{ cipher_version: string }>("PRAGMA cipher_version"))?.cipher_version) throw new Error("SQLCipher unavailable");
     await db.execAsync(`PRAGMA key = "x'${await databaseKey()}'"`);
@@ -47,7 +53,7 @@ async function open() {
       for (let v = version; v < migrations.length; v++) await db.execAsync(`${migrations[v]} PRAGMA user_version = ${v + 1};`);
     });
     return db;
-  } catch { await db.closeAsync().catch(() => {}); throw new Error("Encrypted offline storage unavailable"); }
+  } catch { await db.closeAsync().catch(() => {}); throw new OfflineStorageUnavailable("Encrypted offline storage unavailable"); }
 }
 
 let serial: Promise<unknown> = Promise.resolve();

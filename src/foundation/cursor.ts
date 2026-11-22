@@ -2,8 +2,8 @@ import { uuid } from "./workspace-context";
 
 const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-// Account and ledger lists are unbound; catalog lists bind their cursor to the workspace.
-export function isCursor(value: unknown, expectedWorkspaceId?: string): value is string {
+// Accounts and ledger are unbound; catalogs bind the workspace; budgets also bind the period.
+export function isCursor(value: unknown, expectedWorkspaceId?: string, expectedFilter?: string): value is string {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(value)) return false;
   let decoded = "", bits = 0, byte = 0;
   for (const char of value) {
@@ -17,7 +17,8 @@ export function isCursor(value: unknown, expectedWorkspaceId?: string): value is
   try {
     const tuple: unknown = JSON.parse(decoded);
     if (!Array.isArray(tuple) || JSON.stringify(tuple) !== decoded) return false;
-    if (expectedWorkspaceId === undefined ? tuple.length !== 2 : tuple.length !== 3 || tuple[0] !== expectedWorkspaceId || !uuid(tuple[0])) return false;
+    if (expectedFilter !== undefined && (expectedWorkspaceId === undefined || tuple[3] !== expectedFilter || bits === 6 || (byte & ((1 << bits) - 1)) !== 0)) return false;
+    if (expectedWorkspaceId === undefined ? tuple.length !== 2 : tuple.length !== (expectedFilter === undefined ? 3 : 4) || tuple[0] !== expectedWorkspaceId || !uuid(tuple[0])) return false;
     const [createdAt, id] = expectedWorkspaceId === undefined ? tuple : tuple.slice(1);
     if (typeof createdAt !== "string" || !/^(?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(createdAt) || !uuid(id)) return false;
     const date = new Date(createdAt);

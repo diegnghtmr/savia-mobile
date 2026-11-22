@@ -47,7 +47,8 @@ function Rates({ api }: { api: Transfers }) {
 
 type Choices = Awaited<ReturnType<Transfers["loadAccounts"]>>;
 const modes = { transfer: "Misma moneda", exchange: "Cambio de moneda", rates: "Tasas de cambio" } as const;
-function TransferForm({ mode, accounts, busy, submit }: { mode: TransferMode; accounts: Choices; busy: boolean; submit: (draft: TransferDraft, complete: () => void) => void }) {
+function TransferForm({ mode, accounts, busy, submit }: { mode: TransferMode; accounts: Choices; busy: boolean; submit: (draft: TransferDraft, form: object, complete: () => void) => void }) {
+  const form = useRef({});
   const [draft, setDraft] = useState<TransferDraft>({});
   const set = (field: keyof TransferDraft, value: string) => setDraft((old) => ({ ...old, [field]: value }));
   const field = (key: keyof TransferDraft, label: string) => <Field label={label} value={draft[key] ?? ""} busy={busy} change={(value) => set(key, value)} />;
@@ -60,7 +61,7 @@ function TransferForm({ mode, accounts, busy, submit }: { mode: TransferMode; ac
     {picker("sourceAccountId", "Origen")}{picker("destinationAccountId", "Destino")}{field("amount", "Importe enviado")}
     {mode === "exchange" && <>{field("received", "Importe recibido")}{field("executedRate", "Tasa ejecutada")}</>}
     {field("date", "Fecha (AAAA-MM-DD, UTC)")}{field("description", "Descripción (opcional)")}
-    <AuthAction label={mode === "transfer" ? "Registrar transferencia" : "Registrar cambio"} disabled={busy} action={() => submit(draft, () => setDraft({}))} />
+    <AuthAction label={mode === "transfer" ? "Registrar transferencia" : "Registrar cambio"} disabled={busy} action={() => submit(draft, form.current, () => { form.current = {}; setDraft({}); })} />
   </>;
 }
 
@@ -75,10 +76,10 @@ export function TransfersScreen({ api, back }: { api: Transfers; back: () => voi
     void api.loadAccounts().then((value) => { if (current) setAccounts(value); }, () => { if (current) setAccounts(null); });
     return () => { current = false; };
   }, [api, attempt]);
-  function submit(draft: TransferDraft, complete: () => void) {
+  function submit(draft: TransferDraft, form: object, complete: () => void) {
     void run(async (confirmation) => {
       setNotice("");
-      try { await api.submit(mode, draft, confirmation); }
+      try { await api.submit(mode, draft, confirmation, form); }
       catch (error) { if (error instanceof OutboxQueued) complete(); throw error; }
       complete();
       setNotice(mode === "transfer" ? "Transferencia registrada." : "Cambio de moneda registrado.");

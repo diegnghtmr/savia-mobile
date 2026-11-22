@@ -20,11 +20,11 @@ export async function pendingSlot(workspace: string, profile: string, normalized
 }
 
 export async function pendingSubmission(workspace: string, profile: string, normalized: string, operation: (key: string) => Promise<unknown>,
-  { serverDate, ifMatch, confirmation, journal = secureStorage, initialKey }: {
+  { serverDate, ifMatch, confirmation, journal = secureStorage, journalSlot, initialKey }: {
     serverDate: number | null; ifMatch?: string; confirmation?: PendingSubmissionExpired;
-    journal?: typeof secureStorage; initialKey?: string;
+    journal?: typeof secureStorage; journalSlot?: string; initialKey?: string;
   }) {
-  const slot = await pendingSlot(workspace, profile, normalized, ifMatch);
+  const slot = journalSlot ?? await pendingSlot(workspace, profile, normalized, ifMatch);
   const current = inFlight.get(slot);
   if (current) return current;
   const submit = (async () => {

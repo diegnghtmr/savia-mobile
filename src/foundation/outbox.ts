@@ -9,13 +9,15 @@ import { secureStorage } from "./session-store";
 import { isOfflineFailure, TransportError } from "./transport";
 import { uuid } from "./workspace-context";
 
-type Entry = { id: number; path: string; body: string; slot: string; key: string; queued_at: number; record: string | null; issue: string | null };
+type Entry = { id: number; path: string; body: string; slot: string; legacy_slot: string | null; key: string; queued_at: number; record: string | null; issue: string | null };
 const scope = "principal = ? AND profile = ? AND workspace = ?";
 const normalize = (path: string, body: object) => JSON.stringify(["POST", path, body]);
 const allowed = (path: string, body: object) => path === "/v1/transfers" || path === "/v1/currency-exchanges" ||
-  (path === "/v1/transactions" && "type" in body && (body.type === "expense" || body.type === "income"));
+  (path === "/v1/transactions" && (("status" in body && body.status === "draft") ||
+    ("type" in body && (body.type === "expense" || body.type === "income"))));
 
 export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () => Promise<string | null>, profile: string, workspace: string, request: ScopedRequest) {
+  const forms = new WeakMap<object, { id: string; accepted: Set<string> }>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((listener) => listener());
   const find = (principal: string, id: number) => store((db) => db.getFirstAsync<Entry>(`SELECT * FROM outbox WHERE ${scope} AND id = ?`, principal, profile, workspace, id));
@@ -40,7 +42,7 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
               if (await owner() !== principal || !await find(principal, item.id)) throw new Error(workspaceUnavailable);
               return creationReceipt(item.path, body, await operation(key));
             }, {
-              serverDate, initialKey: item.key,
+              serverDate, initialKey: item.key, journalSlot: item.slot,
               confirmation: item.issue === "expired" ? new PendingSubmissionExpired(item.slot, item.record!) : undefined,
               journal: {
                 getItem: async () => (await find(principal, item.id))?.record ?? null,
@@ -49,8 +51,8 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
                     readPendingRecord(record)!.key, record, principal, profile, workspace, item.id));
                   if (updated.changes !== 1) throw new Error(workspaceUnavailable);
                 },
-                async removeItem(slot) {
-                  if (await secureStorage.getItem(slot) !== null) await secureStorage.removeItem(slot);
+                async removeItem() {
+                  if (item.legacy_slot && await secureStorage.getItem(item.legacy_slot) !== null) await secureStorage.removeItem(item.legacy_slot);
                   await store((db) => db.runAsync(`DELETE FROM outbox WHERE ${scope} AND id = ?`, principal, profile, workspace, item.id));
                 },
               },
@@ -78,16 +80,28 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
     if (expected !== workspace || options?.method !== "POST" || !options.submit || !body || typeof body !== "object" || !allowed(path, body)) return request(expected, path, options);
     const principal = await owner();
     if (!principal) throw new Error(workspaceUnavailable);
-    const slot = await pendingSlot(workspace, profile, normalize(path, body));
+    const form = options.form;
+    let attempt = form ? forms.get(form) : undefined;
+    if (!attempt) {
+      attempt = { id: randomUUID(), accepted: new Set() };
+      if (form) forms.set(form, attempt);
+    }
+    const command = normalize(path, body), legacy = await pendingSlot(workspace, profile, command);
+    const slot = await pendingSlot(workspace, profile, JSON.stringify(["outbox", attempt.id, command]));
     const id = await store(async (db) => {
-      const record = await secureStorage.getItem(slot);
+      const existing = await db.getFirstAsync<{ id: number }>(`SELECT id FROM outbox WHERE ${scope} AND slot = ?`, principal, profile, workspace, slot);
+      if (existing || attempt.accepted.has(slot)) return existing?.id;
+      const claimed = await db.getFirstAsync(`SELECT id FROM outbox WHERE ${scope} AND legacy_slot = ?`, principal, profile, workspace, legacy);
+      const record = claimed ? null : await secureStorage.getItem(legacy);
       const key = readPendingRecord(record)?.key ?? uuid(record) ?? randomUUID();
-      await db.runAsync(`INSERT OR IGNORE INTO outbox (principal, profile, workspace, path, body, slot, key, queued_at, record)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? FROM membership WHERE principal = ? AND profile = ? AND json_extract(snapshot, '$.active.id') = ?`,
-        principal, profile, workspace, path, JSON.stringify(body), slot, key, Date.now(), record, principal, profile, workspace);
+      const saved = await db.runAsync(`INSERT INTO outbox (principal, profile, workspace, path, body, slot, key, queued_at, record, legacy_slot)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM membership WHERE principal = ? AND profile = ? AND json_extract(snapshot, '$.active.id') = ?`,
+        principal, profile, workspace, path, JSON.stringify(body), slot, key, Date.now(), record, record === null ? null : legacy, principal, profile, workspace);
+      if (saved.changes !== 1) throw new Error(workspaceUnavailable);
+      attempt.accepted.add(slot);
       return (await db.getFirstAsync<{ id: number }>(`SELECT id FROM outbox WHERE ${scope} AND slot = ?`, principal, profile, workspace, slot))?.id;
     });
-    if (!id) throw new Error(workspaceUnavailable);
+    if (!id) throw new OutboxQueued(null);
     changed();
     const result = (await drain()).get(id);
     if (result) return result;

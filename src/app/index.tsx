@@ -3,6 +3,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useState } from "react";
 import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
+import { createBudgetWrites } from "../foundation/budget-writes";
+import { createBudgets } from "../foundation/budgets";
 import { createIdentity } from "../foundation/identity";
 import { createOffline } from "../foundation/offline-cache";
 import { createTransactions } from "../foundation/transactions";
@@ -10,6 +12,7 @@ import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
+import { BudgetsScreen } from "../mobile-shell/budgets-screen";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
 import { OutboxPanel } from "../mobile-shell/outbox-panel";
 import { paletteFor } from "../mobile-shell/tokens";
@@ -20,27 +23,29 @@ const transport = () => createTransport({ sessions: { read: () => getAuth().read
 const offline = createOffline(createIdentity((operation) => transport().withSession(operation)), () => getAuth().localPrincipal?.() ?? Promise.resolve(null));
 
 export default function Index() {
-  return <AuthGate auth={getAuth} identity={offline.identity} beforeSignOut={offline.beforeSignOut}
+  return <AuthGate auth={getAuth} identity={offline.identity} signOut={offline.signOut}
     home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} />} />;
 }
 
 function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
-  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers">("home");
+  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets">("home");
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [apis] = useState(() => {
-    const scoped = offline.scope(profile, id, (...args) => transport().requestInWorkspace(...args), (at) => setSavedAt((old) => Math.min(old ?? at, at)));
+    const scoped = offline.scope(profile, id, (...args) => transport().requestInWorkspace(...args), (at) => setSavedAt((old) => Math.min(old ?? at, at)), () => setSavedAt(null));
     const box = offline.outbox(profile, id, scoped), transactions = createTransactions(box.request, id);
-    return { box, accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(box.request, id, transactions.transferAccounts) };
+    return { box, accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(box.request, id, transactions.transferAccounts),
+      budgets: createBudgets(scoped, id, () => transactions.options("categories")), budgetWrites: createBudgetWrites(scoped, id) };
   });
   const back = () => show("home");
   return <><OfflineBanner savedAt={savedAt} /><OutboxPanel box={apis.box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} back={back} />
     : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />
     : route === "transfers" ? <TransfersScreen api={apis.transfers} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} />}</>;
+    : route === "budgets" ? <BudgetsScreen api={apis.budgets} writes={apis.budgetWrites} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -59,6 +64,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
         {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
         {openTransfers && <AuthAction label="Transferencias" action={openTransfers} />}
+        {openBudgets && <AuthAction label="Presupuestos" action={openBudgets} />}
       </ScrollView>
     </SafeAreaView>
   );

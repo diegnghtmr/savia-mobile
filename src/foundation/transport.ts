@@ -11,6 +11,7 @@ type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
   expectedProfile?: string;
+  form?: object;
   onMembership?: (context: WorkspaceContext) => Promise<void>;
   submit?: (profileId: string, operation: (key: string) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
 };

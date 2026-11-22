@@ -66,8 +66,9 @@ function fixture() {
 test("offline creates survive reopen and drain normalized transaction, transfer and exchange in order with fresh checks", async () => {
   const f = fixture(), { box, ledger, transfers } = await f.ready();
   f.change("offline");
-  await expect(ledger.create(tx)).rejects.toThrow(notice);
-  await expect(ledger.create({ ...tx, amount: "01.20" })).rejects.toThrow(notice);
+  const form = {};
+  await expect(ledger.create(tx, undefined, form)).rejects.toThrow(notice);
+  await expect(ledger.create({ ...tx, amount: "01.20" }, undefined, form)).rejects.toThrow(notice);
   await expect(transfers.submit("transfer", transfer)).rejects.toThrow(notice);
   await expect(transfers.submit("exchange", fx)).rejects.toThrow(notice);
   expect(f.posts).toEqual([]);
@@ -129,6 +130,17 @@ test.each(["revocation", "sign-out"])("%s purges that workspace outbox without s
   const f = fixture(), { box, ledger, service } = await f.ready();
   f.change("offline"); await expect(ledger.create(tx)).rejects.toThrow(notice);
   if (reason === "revocation") { f.revoke(); f.change("online"); await box.sync(); }
-  else await service.beforeSignOut();
+  else await service.signOut(async () => {});
   expect(f.posts).toEqual([]); expect(await f.open().box.list()).toEqual([]);
+});
+
+// Reviewer regression (verify mwr70vb0). Append to __tests__/outbox.test.ts.
+test("queues a draft-status transaction offline and preserves that status at sync", async () => {
+  const f = fixture(), { box, ledger } = await f.ready();
+  f.change("offline");
+  await expect(ledger.create({ ...tx, status: "draft" })).rejects.toThrow(notice);
+  expect(f.posts).toHaveLength(0);
+  expect(await box.list()).toHaveLength(1);
+  f.change("online"); await f.open().box.sync();
+  expect(f.posts.map(({ path, body }) => [path, body.status])).toEqual([[txPath, "draft"]]);
 });

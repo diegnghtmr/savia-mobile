@@ -40,8 +40,9 @@ function Field({ label, value, change, disabled }: { label: string; value: strin
 
 const conflictMessage = "El movimiento cambió. Recarga sus datos antes de volver a intentarlo.";
 
-function Editor({ api, baseline, blocked, cancelDisabled, save, back }: { api: Transactions; baseline?: LedgerDraft; blocked: boolean; cancelDisabled: boolean; save: (draft: LedgerDraft) => void; back: () => void }) {
+function Editor({ api, baseline, blocked, cancelDisabled, save, back }: { api: Transactions; baseline?: LedgerDraft; blocked: boolean; cancelDisabled: boolean; save: (draft: LedgerDraft, form: object) => void; back: () => void }) {
   const creating = baseline === undefined;
+  const form = useRef({});
   const [draft, setDraft] = useState<LedgerDraft>({});
   const [options, setOptions] = useState<Awaited<ReturnType<Transactions["formOptions"]>> | null>();
   useEffect(() => {
@@ -67,7 +68,8 @@ function Editor({ api, baseline, blocked, cancelDisabled, save, back }: { api: T
       {choices("categoryId", "Categoría", options.categories, "Sin categoría")}{choices("payeeId", "Contraparte", options.payees, "Sin contraparte")}
       <Copy>Etiquetas</Copy>{Array.from(options.tags, ([id, name]) => <AuthAction key={id} label={name} disabled={blocked} selected={values.tagIds?.includes(id) ?? false}
         action={() => { const tags = values.tagIds ?? []; choose("tagIds", tags.includes(id) ? tags.filter((tag) => tag !== id) : [...tags, id].sort()); }} />)}
-      <AuthAction label={creating ? "Crear movimiento" : "Guardar cambios"} disabled={blocked || (!creating && !Object.keys(draft).length)} action={() => save(draft)} />
+      <AuthAction label={creating ? "Crear movimiento" : "Guardar cambios"} disabled={blocked || (!creating && !Object.keys(draft).length)} action={() => save(draft, form.current)} />
+      {creating && <AuthAction label="Guardar borrador" disabled={blocked} action={() => save({ ...draft, status: "draft" }, form.current)} />}
     </>}
     <AuthAction label="Cancelar" disabled={cancelDisabled} action={back} />
   </>;
@@ -157,8 +159,8 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     setDraft((old) => { const next = { ...old }; if (value === undefined) delete next[key]; else next[key] = value; return next; });
   }
   if (creating) return <AuthPanel>
-    <Editor api={api} blocked={write.busy || !!write.confirm} cancelDisabled={write.busy} back={() => { create(false); write.clear(); }} save={(draft) => void write.run(async (confirmation) => {
-      await api.create(draft, confirmation); create(false); void load(applied);
+    <Editor api={api} blocked={write.busy || !!write.confirm} cancelDisabled={write.busy} back={() => { create(false); write.clear(); }} save={(draft, form) => void write.run(async (confirmation) => {
+      await api.create(draft, confirmation, form); create(false); void load(applied);
     })} />
     {write.error && <Copy role="alert">{write.error}</Copy>}
     {write.confirm && <AuthAction label={confirmPendingLabel} action={write.confirm} disabled={write.busy} />}

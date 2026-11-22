@@ -36,7 +36,7 @@ const optionalText = (value: unknown) => {
 };
 
 const metadata = ["date", "categoryId", "payeeId", "description", "tagIds"] as const;
-export type LedgerDraft = Partial<Record<"date" | "description" | "categoryId" | "payeeId" | "type" | "amount" | "accountId", string | null> & { tagIds: string[] }>;
+export type LedgerDraft = Partial<Record<"date" | "description" | "categoryId" | "payeeId" | "type" | "amount" | "accountId" | "status", string | null> & { tagIds: string[] }>;
 const invalidMovement = () => new InvalidDraft("Revisa los datos del movimiento.");
 const cleanText = (raw: unknown, max: number) => {
   if (typeof raw !== "string" || raw.includes("\0") || [...raw.trim()].length > max) throw new TypeError();
@@ -45,13 +45,17 @@ const cleanText = (raw: unknown, max: number) => {
 function writeBody(input: unknown, currencies?: Map<string, string>) {
   try {
     const draft = object(input), keys = Object.keys(draft);
-    const allowed = currencies ? [...metadata, "type", "accountId", "amount"] : metadata;
+    const allowed = currencies ? [...metadata, "type", "accountId", "amount", "status"] : metadata;
     if (!keys.length || keys.some((key) => !(allowed as readonly string[]).includes(key))) throw new TypeError();
     const body: Record<string, unknown> = currencies ? { categoryId: null, payeeId: null, description: null, tagIds: [] } : {};
     if (currencies) {
       const accountId = requiredId(draft.accountId), currency = currencies.get(accountId);
       if (!currency || !isMember(types, draft.type) || !Object.hasOwn(draft, "date")) throw new TypeError();
       Object.assign(body, { accountId, type: draft.type, amount: { currency, amountMinor: amountMinor(cleanText(draft.amount, 64), currency) } });
+      if (Object.hasOwn(draft, "status")) {
+        if (draft.status !== "draft" && draft.status !== "pending" && draft.status !== "confirmed") throw new TypeError();
+        body.status = draft.status;
+      }
     }
     for (const key of metadata) {
       if (!Object.hasOwn(draft, key)) continue;
@@ -111,8 +115,8 @@ function transaction(input: unknown) {
 export function createTransactions(request: ScopedRequest, workspaceId: string) {
   const get = (path: string) => request(workspaceId, path, { successStatus: 200 });
   let accountCurrencies = new Map<string, string>();
-  async function write(method: "POST" | "PATCH", path: string, body: object, confirmation?: PendingSubmissionExpired, expected?: string, ifMatch?: string) {
-    const result = await request(workspaceId, path, { method, body, ifMatch, successStatus: expected ? 200 : 201,
+  async function write(method: "POST" | "PATCH", path: string, body: object, confirmation?: PendingSubmissionExpired, expected?: string, ifMatch?: string, form?: object) {
+    const result = await request(workspaceId, path, { method, body, ifMatch, form, successStatus: expected ? 200 : 201,
       submit: (profile, operation, serverDate) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
         const saved = object(await operation(key));
         if (!expected) return creationReceipt(path, body, saved);
@@ -156,7 +160,9 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
       if (creating) accountCurrencies = currencies;
       return { accounts: new Map([...currencies].map(([id, currency]) => [id, `${accounts.get(id)} (${currency})`])), categories, payees, tags };
     },
-    async create(input: unknown, confirmation?: PendingSubmissionExpired) { return write("POST", endpoint, writeBody(input, accountCurrencies), confirmation); },
+    async create(input: unknown, confirmation?: PendingSubmissionExpired, form?: object) {
+      return write("POST", endpoint, writeBody(input, accountCurrencies), confirmation, undefined, undefined, form);
+    },
     async update(raw: unknown, etag: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
       const id = uuid(raw);
       if (!id || !isETag(etag)) throw invalidMovement();

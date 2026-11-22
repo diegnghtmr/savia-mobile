@@ -45,7 +45,7 @@ function RecoveryForm({ identity, busy, submit }: { identity: Identity; busy: bo
 
 const unauthorized = (error: unknown) => error instanceof TransportError && error.kind === "http" && error.status === 401;
 type Route = "loading" | "sign-in" | "onboarding" | "workspace" | "retry";
-export function AuthGate({ auth, identity, home, beforeSignOut }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace, profile: string) => ReactNode); beforeSignOut?: () => Promise<void> }) {
+export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace, profile: string) => ReactNode); signOut?: (operation: () => Promise<void>) => Promise<void> }) {
   const colors = paletteFor(useColorScheme());
   const [route, setRoute] = useState<Route>("loading");
   const [context, setContext] = useState<WorkspaceContext | null>(null);
@@ -99,7 +99,10 @@ export function AuthGate({ auth, identity, home, beforeSignOut }: { auth: () => 
       await check();
     }, "No pudimos continuar. Verifica tus datos e inténtalo de nuevo.");
   }
-  const signOut = () => void run(async () => { await beforeSignOut?.(); await auth().signOut(); setContext(null); setRoute("sign-in"); }, "No pudimos cerrar la sesión.");
+  const signOut = () => void run(async () => {
+    const close = async () => { await auth().signOut(); setContext(null); setRoute("sign-in"); };
+    await (purgeAfterSignOut ? purgeAfterSignOut(close) : close());
+  }, "No pudimos cerrar la sesión.");
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
   if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
     <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>

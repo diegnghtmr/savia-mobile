@@ -91,12 +91,12 @@ export function createTransfers(request: ScopedRequest, workspaceId: string, acc
       currencies = new Map(accounts.map(({ id, currency }) => [id, currency]));
       return accounts;
     },
-    async submit(mode: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
+    async submit(mode: unknown, input: unknown, confirmation?: PendingSubmissionExpired, form?: object) {
       const { path, body } = transferBody(mode, input, currencies);
       const workspace = uuid(workspaceId);
       if (!workspace) throw new TypeError();
       const method = "POST";
-      const result = await request(workspace, path, { method, body, successStatus: 201,
+      const result = await request(workspace, path, { method, body, form, successStatus: 201,
         submit: (profile, operation, serverDate) => pendingSubmission(workspace, profile, JSON.stringify([method, path, body]), async (key) => {
           return creationReceipt(path, body, object(await operation(key)));
         }, { confirmation, serverDate }),
