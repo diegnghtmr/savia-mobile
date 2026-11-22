@@ -34,7 +34,7 @@ function amountMinor(value: string, currency: string) {
   return `${minor === "0" ? "" : match[1]}${minor}`;
 }
 
-function money(input: unknown, expected?: string) {
+export function money(input: unknown, expected?: string) {
   const { amountMinor: minor, currency } = record(input);
   if (typeof minor !== "string" || !/^-?\d+$/.test(minor) || typeof currency !== "string" || !ACTIVE_CURRENCIES.has(currency) || (expected && currency !== expected)) throw new TypeError();
   const count = scale(currency);

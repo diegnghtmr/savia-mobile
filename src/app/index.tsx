@@ -4,10 +4,12 @@ import { useState } from "react";
 import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
 import { createIdentity } from "../foundation/identity";
+import { createTransactions } from "../foundation/transactions";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { paletteFor } from "../mobile-shell/tokens";
+import { TransactionsScreen } from "../mobile-shell/transactions-screen";
 
 const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
 const identity = createIdentity((operation) => transport().withSession(operation));
@@ -17,12 +19,18 @@ export default function Index() {
 }
 
 function WorkspaceHome({ id }: { id: string }) {
-  const [accounts, showAccounts] = useState(false);
-  const [api] = useState(() => createAccounts((...args) => transport().requestInWorkspace(...args), id));
-  return accounts ? <AccountsScreen api={api} back={() => showAccounts(false)} /> : <HomeScreen openAccounts={() => showAccounts(true)} />;
+  const [route, show] = useState<"home" | "accounts" | "transactions">("home");
+  const [apis] = useState(() => {
+    const scoped: ReturnType<typeof createTransport>["requestInWorkspace"] = (...args) => transport().requestInWorkspace(...args);
+    return { accounts: createAccounts(scoped, id), transactions: createTransactions(scoped, id) };
+  });
+  const back = () => show("home");
+  if (route === "accounts") return <AccountsScreen api={apis.accounts} back={back} />;
+  if (route === "transactions") return <TransactionsScreen api={apis.transactions} back={back} />;
+  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} />;
 }
 
-export function HomeScreen({ openAccounts }: { openAccounts?: () => void } = {}) {
+export function HomeScreen({ openAccounts, openTransactions }: { openAccounts?: () => void; openTransactions?: () => void } = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -38,6 +46,7 @@ export function HomeScreen({ openAccounts }: { openAccounts?: () => void } = {})
           <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>
         </Pressable>
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
+        {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
       </ScrollView>
     </SafeAreaView>
   );
