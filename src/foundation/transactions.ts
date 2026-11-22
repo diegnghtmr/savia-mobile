@@ -2,6 +2,7 @@ import { amountMinor, isETag, money, type ScopedRequest } from "./accounts";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
+import type { PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSubmission } from "./pending-submission";
 import { uuid } from "./workspace-context";
 
@@ -109,14 +110,14 @@ function transaction(input: unknown) {
 export function createTransactions(request: ScopedRequest, workspaceId: string) {
   const get = (path: string) => request(workspaceId, path, { successStatus: 200 });
   let accountCurrencies = new Map<string, string>();
-  async function write(method: "POST" | "PATCH", path: string, body: object, expected?: string, ifMatch?: string) {
+  async function write(method: "POST" | "PATCH", path: string, body: object, confirmation?: PendingSubmissionExpired, expected?: string, ifMatch?: string) {
     const result = await request(workspaceId, path, { method, body, ifMatch, successStatus: expected ? 200 : 201,
       submit: (profile, operation) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
         const saved = object(await operation(key));
         const id = requiredId(saved.id);
         if ((expected && id !== expected) || (path.endsWith("/void") && saved.status !== "voided")) throw new TypeError();
         return id;
-      }),
+      }, { ifMatch, confirmation }),
     });
     return requiredId(result);
   }
@@ -153,19 +154,19 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
       if (creating) accountCurrencies = currencies;
       return { accounts: new Map([...currencies].map(([id, currency]) => [id, `${accounts.get(id)} (${currency})`])), categories, payees, tags };
     },
-    async create(input: unknown) { return write("POST", endpoint, writeBody(input, accountCurrencies)); },
-    async update(raw: unknown, etag: unknown, input: unknown) {
+    async create(input: unknown, confirmation?: PendingSubmissionExpired) { return write("POST", endpoint, writeBody(input, accountCurrencies), confirmation); },
+    async update(raw: unknown, etag: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
       const id = uuid(raw);
       if (!id || !isETag(etag)) throw invalidMovement();
-      return write("PATCH", `${endpoint}/${id}`, writeBody(input), id, etag);
+      return write("PATCH", `${endpoint}/${id}`, writeBody(input), confirmation, id, etag);
     },
-    async void(raw: unknown, etag: unknown, value: unknown, confirmed: unknown) {
+    async void(raw: unknown, etag: unknown, value: unknown, confirmed: unknown, confirmation?: PendingSubmissionExpired) {
       const id = uuid(raw);
       if (!id || !isETag(etag) || confirmed !== true) throw invalidMovement();
       let reason: string;
       try { reason = cleanText(value, 500); if ([...reason].length < 3) throw new TypeError(); }
       catch { throw new InvalidDraft("Escribe un motivo de 3 a 500 caracteres."); }
-      return write("POST", `${endpoint}/${id}/void`, { reason }, id, etag);
+      return write("POST", `${endpoint}/${id}/void`, { reason }, confirmation, id, etag);
     },
     async list(input: unknown = {}) {
       const params = queryFor(input);

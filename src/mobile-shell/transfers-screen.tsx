@@ -4,6 +4,7 @@ import { InvalidDraft } from "../foundation/identity-draft";
 import type { RateFilters, TransferDraft, TransferMode, Transfers } from "../foundation/transfers";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
   const colors = paletteFor(useColorScheme());
@@ -45,7 +46,7 @@ function Rates({ api }: { api: Transfers }) {
 
 type Choices = Awaited<ReturnType<Transfers["loadAccounts"]>>;
 const modes = { transfer: "Misma moneda", exchange: "Cambio de moneda", rates: "Tasas de cambio" } as const;
-function TransferForm({ api, mode, accounts, busy, submit }: { api: Transfers; mode: TransferMode; accounts: Choices; busy: boolean; submit: (operation: () => Promise<string>) => Promise<boolean> }) {
+function TransferForm({ mode, accounts, busy, submit }: { mode: TransferMode; accounts: Choices; busy: boolean; submit: (draft: TransferDraft, complete: () => void) => void }) {
   const [draft, setDraft] = useState<TransferDraft>({});
   const set = (field: keyof TransferDraft, value: string) => setDraft((old) => ({ ...old, [field]: value }));
   const field = (key: keyof TransferDraft, label: string) => <Field label={label} value={draft[key] ?? ""} busy={busy} change={(value) => set(key, value)} />;
@@ -58,7 +59,7 @@ function TransferForm({ api, mode, accounts, busy, submit }: { api: Transfers; m
     {picker("sourceAccountId", "Origen")}{picker("destinationAccountId", "Destino")}{field("amount", "Importe enviado")}
     {mode === "exchange" && <>{field("received", "Importe recibido")}{field("executedRate", "Tasa ejecutada")}</>}
     {field("date", "Fecha (AAAA-MM-DD, UTC)")}{field("description", "Descripción (opcional)")}
-    <AuthAction label={mode === "transfer" ? "Registrar transferencia" : "Registrar cambio"} disabled={busy} action={() => void submit(() => api.submit(mode, draft)).then((ok) => { if (ok) setDraft({}); })} />
+    <AuthAction label={mode === "transfer" ? "Registrar transferencia" : "Registrar cambio"} disabled={busy} action={() => submit(draft, () => setDraft({}))} />
   </>;
 }
 
@@ -66,28 +67,30 @@ export function TransfersScreen({ api, back }: { api: Transfers; back: () => voi
   const [mode, select] = useState<keyof typeof modes>("transfer");
   const [accounts, setAccounts] = useState<Choices | null>();
   const [attempt, retry] = useState(0);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
-  const lock = useRef(false);
+  const { run, busy, error, confirm, clear } = usePendingWrite();
+  const [notice, setNotice] = useState("");
   useEffect(() => {
     let current = true;
     void api.loadAccounts().then((value) => { if (current) setAccounts(value); }, () => { if (current) setAccounts(null); });
     return () => { current = false; };
   }, [api, attempt]);
-  async function submit(operation: () => Promise<string>) {
-    if (lock.current) return false;
-    lock.current = true; setBusy(true); setError(""); setNotice("");
-    try { await operation(); setNotice(mode === "transfer" ? "Transferencia registrada." : "Cambio de moneda registrado."); return true; }
-    catch (failure) { setError(failure instanceof InvalidDraft ? failure.message : "No pudimos registrar la operación. Vuelve a intentarlo."); return false; }
-    finally { lock.current = false; setBusy(false); }
+  function submit(draft: TransferDraft, complete: () => void) {
+    void run(async (confirmation) => {
+      setNotice("");
+      await api.submit(mode, draft, confirmation);
+      complete();
+      setNotice(mode === "transfer" ? "Transferencia registrada." : "Cambio de moneda registrado.");
+    }, "No pudimos registrar la operación. Vuelve a intentarlo.");
   }
   return <AuthPanel>
     <Copy role="header">Transferencias</Copy><AuthAction label="Volver al resumen" action={back} disabled={busy} />
     {(Object.keys(modes) as (keyof typeof modes)[]).map((key) => <AuthAction key={key} label={modes[key]} selected={mode === key} disabled={busy}
-      action={() => { select(key); setError(""); setNotice(""); }} />)}
+      action={() => { select(key); clear(); setNotice(""); }} />)}
     {mode === "rates" ? <Rates api={api} /> : accounts === null ? <>
       <Copy role="alert">No pudimos cargar las cuentas.</Copy><AuthAction label="Reintentar" action={() => { setAccounts(undefined); retry((n) => n + 1); }} />
     </> : !accounts ? <Copy>Cargando cuentas…</Copy> : accounts.length < 2 ? <Copy>Necesitas dos cuentas para registrar esta operación.</Copy>
-      : <TransferForm key={mode} api={api} mode={mode} accounts={accounts} busy={busy} submit={submit} />}
+      : <TransferForm key={mode} mode={mode} accounts={accounts} busy={busy || !!confirm} submit={submit} />}
     {error && <Copy role="alert">{error}</Copy>}{notice && <Copy>{notice}</Copy>}
+    {confirm && <AuthAction label={confirmPendingLabel} action={confirm} disabled={busy} />}
   </AuthPanel>;
 }

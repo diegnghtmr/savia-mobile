@@ -17,6 +17,7 @@ const lookupCursor = Buffer.from(JSON.stringify(["2026-11-01T15:00:00.000000Z", 
 const rate = { id: id(6), baseCurrency: "KWD", quoteCurrency: "JPY", rate: "0.123456789012345678", effectiveAt: "2026-11-01T15:00:00.000Z", source: "frankfurter", isStale: true, ageHours: 73.5 };
 const page = (items: unknown[], nextCursor: string | null = null) => ({ items, pageInfo: { hasNextPage: nextCursor !== null, nextCursor } });
 const secure = jest.mocked(SecureStore);
+const pendingKey = (value: string) => JSON.parse(value).key;
 beforeEach(() => { jest.resetAllMocks(); });
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 const enter = async (name: string, value: string) => fireEvent.changeText(await screen.findByLabelText(name), value);
@@ -46,7 +47,7 @@ function setup({ lostReply = false } = {}) {
     const key = headers.get("Idempotency-Key");
     if (init.method !== "POST" || !key || !["/v1/transfers", "/v1/currency-exchanges"].includes(pathname)) return reply({}, 404);
     const body = JSON.parse(String(init.body));
-    writes.push({ path: pathname, key, persisted: pending().some(([, saved]) => saved === key), body });
+    writes.push({ path: pathname, key, persisted: pending().some(([, saved]) => pendingKey(saved) === key), body });
     if (records.has(key)) return reply(records.get(key), 201);
     const result = { id: id(9), sourceAccountId: body.sourceAccountId, destinationAccountId: body.destinationAccountId };
     records.set(key, result);
@@ -85,7 +86,7 @@ test.each([["transfer", transfer], ["exchange", exchange]])("replays a committed
   const amount = { amountMinor: "9007199254740993012", currency: "KWD" };
   const body = { sourceAccountId: source, destinationAccountId: dest, occurredAt: "2024-02-29T00:00:00.000Z", description: "Ahorro", ...(mode === "transfer" ? { amount } : { sourceAmount: amount, destinationAmount: { amountMinor: "37", currency: "JPY" }, executedRate: "0.123456789012345678" }) };
   expect(writes).toEqual([{ path: mode === "transfer" ? "/v1/transfers" : "/v1/currency-exchanges", key: expect.stringMatching(/^[a-f\d-]{36}$/), persisted: true, body }]);
-  expect(records.size).toBe(1); expect(pending().map(([, key]) => key)).toEqual([writes[0].key]);
+  expect(records.size).toBe(1); expect(pending().map(([, value]) => pendingKey(value))).toEqual([writes[0].key]);
   const second = connect(); await second.loadAccounts();
   await expect(second.submit(mode, { ...input, amount: "09007199254740993.012", description: "Ahorro", ...(mode === "exchange" && { executedRate: "0.123456789012345678" }) })).resolves.toBe(id(9));
   expect(writes[1]).toEqual(writes[0]); expect(records.size).toBe(1); expect(pending()).toEqual([]);
@@ -110,6 +111,33 @@ test("offers a transfer and exchange form without fees and requires both receive
   await enter("Tasa ejecutada", "0.12"); await press("Registrar cambio");
   expect(await screen.findByText("Cambio de moneda registrado.")).toBeTruthy();
   expect(writes).toHaveLength(1);
+});
+
+test.each(["transfer", "exchange"])("blocks an expired %s until explicit confirmation sends the same draft with a new key", async (mode) => {
+  const { connect, writes, records, pending } = setup({ lostReply: true });
+  let now = Date.UTC(2026, 10, 1);
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
+  const isExchange = mode === "exchange", submit = isExchange ? "Registrar cambio" : "Registrar transferencia";
+  async function fill() {
+    if (isExchange) await press("Cambio de moneda");
+    await press("Origen: Efectivo (KWD)"); await press(isExchange ? "Destino: Viaje (JPY)" : "Destino: Ahorros (KWD)");
+    await enter("Importe enviado", "25,125"); await enter("Fecha (AAAA-MM-DD, UTC)", "2024-02-29");
+    if (isExchange) { await enter("Importe recibido", "3"); await enter("Tasa ejecutada", "0.12"); }
+  }
+  try {
+    const first = await render(<TransfersScreen api={connect()} back={jest.fn()} />);
+    await fill(); await press(submit);
+    expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos registrar la operación. Vuelve a intentarlo.");
+    await first.unmount(); now += 23 * 60 * 60 * 1000 + 1;
+    await render(<TransfersScreen api={connect()} back={jest.fn()} />);
+    await fill(); await press(submit);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.");
+    expect(writes).toHaveLength(1); expect(records.size).toBe(1); expect(pending()).toHaveLength(1);
+    await press("Registrar de todos modos");
+    expect(await screen.findByText(isExchange ? "Cambio de moneda registrado." : "Transferencia registrada.")).toBeTruthy();
+    expect(writes[1].key).not.toBe(writes[0].key); expect(writes[1]).toMatchObject({ body: writes[0].body, persisted: true });
+    expect(records.size).toBe(2); expect(pending()).toEqual([]); expect(screen.getByLabelText("Importe enviado")).toHaveProp("value", "");
+  } finally { clock.mockRestore(); }
 });
 
 test("filters read-only rates and shows exact rate, source, effective time and available freshness", async () => {

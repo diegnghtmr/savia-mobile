@@ -12,6 +12,7 @@ const id = (n: number) => `abcdefab-abcd-4abc-8abc-abcdefabcde${n}`;
 const [workspace, profile, account, category, payee, tag, movement] = Array.from({ length: 7 }, (_, n) => id(n));
 const draft = { type: "expense", accountId: account, date: "2026-11-01", amount: "9007199254740993,012", description: "Café nuevo", categoryId: category, payeeId: payee, tagIds: [tag] };
 const secure = jest.mocked(SecureStore);
+const pendingKey = (value: string) => value.startsWith("{") ? JSON.parse(value).key : value;
 const path = "/v1/transactions";
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 const enter = async (label: string, value: string) => fireEvent.changeText(await screen.findByLabelText(label), value);
@@ -40,7 +41,7 @@ function setup({ loseReply = false } = {}) {
       return reply(page(({ "/v1/accounts": [{ id: account, name: "Caja", status: "active", currency: "KWD" }], "/v1/categories": [{ id: category, name: "Comida" }], "/v1/payees": [{ id: payee, name: "Tienda" }], "/v1/tags": [{ id: tag, name: "Viaje" }] })[pathname as "/v1/accounts"] ?? []));
     }
     const key = headers.get("Idempotency-Key"), match = headers.get("If-Match"), body = JSON.parse(String(init.body));
-    writes.push({ method: init.method!, url: pathname, key, match, body, pending: pending().some(([, value]) => value === key) });
+    writes.push({ method: init.method!, url: pathname, key, match, body, pending: pending().some(([, value]) => pendingKey(value) === key) });
     if (pathname === path && key) {
       if (created.has(key)) return reply(created.get(key), 201);
       const result = { ...row, ...body, id: id(7 + created.size) }; created.set(key, result);
@@ -69,7 +70,7 @@ test("reuses a securely persisted normalized draft after commit, lost reply and 
   expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos guardar el movimiento. Vuelve a intentarlo.");
   expect(created.size).toBe(1); expect(pending()).toHaveLength(1);
   expect(pending()[0][0]).toMatch(new RegExp(`${workspace}.*[0-9a-f]{64}$`));
-  expect(pending()[0][1]).toBe(writes[0].key);
+  expect(pendingKey(pending()[0][1])).toBe(writes[0].key);
   expect(writes[0]).toMatchObject({ method: "POST", url: path, match: null, pending: true, body: { type: "expense", accountId: account, occurredAt: "2026-11-01T00:00:00.000Z", amount: { currency: "KWD", amountMinor: "9007199254740993012" }, categoryId: category, payeeId: payee, tagIds: [tag], description: "Café nuevo" } });
   await first.unmount();
   const second = await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
@@ -115,8 +116,9 @@ test("retains a stale edit across explicit reload without resubmitting until Sav
   await press("Recargar movimiento"); await screen.findByRole("header", { name: "Cambio remoto" });
   expect(screen.getByDisplayValue("Mi cambio")).toBeTruthy(); expect(writes).toHaveLength(1);
   await press("Guardar cambios"); await screen.findByRole("header", { name: "Mi cambio" });
-  expect(writes.map(({ match, body, key }) => [match, body, key])).toEqual([['"1"', { description: "Mi cambio" }, writes[0].key], ['"2"', { description: "Mi cambio" }, writes[0].key]]);
-  expect(pending()).toEqual([]);
+  expect(writes.map(({ match, body }) => [match, body])).toEqual([['"1"', { description: "Mi cambio" }], ['"2"', { description: "Mi cambio" }]]);
+  expect(writes[1].key).not.toBe(writes[0].key);
+  expect(pending().map(([, value]) => pendingKey(value))).toEqual([writes[0].key]);
 });
 
 test.each(["xyz", "á".repeat(500)])("voids only after explicit confirmation with a valid boundary reason, If-Match and a persisted key", async (reason) => {
@@ -130,4 +132,131 @@ test.each(["xyz", "á".repeat(500)])("voids only after explicit confirmation wit
   await screen.findByText("Gasto · Anulada");
   expect(writes).toEqual([{ method: "POST", url: `${path}/${movement}/void`, key: expect.stringMatching(/^[a-f\d-]{36}$/), match: '"1"', body: { reason }, pending: true }]);
   expect(pending()).toEqual([]); expect(screen.queryByRole("button", { name: "Anular movimiento" })).toBeNull();
+});
+
+// Reviewer regressions (verify mwr473ba, M4 FAIL). Append to __tests__/transaction-writes.test.tsx.
+const replayReply = (body: unknown, status: number, etag?: string) => ({
+  status, ok: status < 300, redirected: false,
+  headers: new Headers(etag ? { ETag: etag } : {}), json: async () => body,
+});
+
+test.each(["lost reply", "interrupted clear"])("does not duplicate a committed create after the replay window: %s", async (failure) => {
+  const { connect, send } = setup();
+  const normal = send.getMockImplementation()!;
+  const committed: string[] = [];
+  const replay = new Map<string, { at: number; id: string }>();
+  let now = Date.UTC(2026, 10, 1);
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    send.mockImplementation(async (url, init) => {
+      if (new URL(url).pathname !== path || init.method !== "POST") return normal(url, init);
+      const key = new Headers(init.headers).get("Idempotency-Key")!;
+      const entry = replay.get(key);
+      // Matches the backend's strictly-newer-than-24-hours replay rule.
+      if (entry && now - entry.at < 24 * 60 * 60 * 1000) return replayReply({ id: entry.id }, 201);
+      const saved = { id: id(7 + committed.length), at: now };
+      committed.push(saved.id); replay.set(key, saved);
+      if (committed.length === 1 && failure === "lost reply") throw new Error("Reply lost after commit");
+      return replayReply({ id: saved.id }, 201);
+    });
+    if (failure === "interrupted clear") secure.deleteItemAsync.mockRejectedValueOnce(new Error("Stopped before clearing the vault"));
+    const first = connect(); await first.formOptions(true);
+    await expect(first.create(draft)).rejects.toThrow();
+    expect(committed).toEqual([id(7)]);
+
+    now += 25 * 60 * 60 * 1000;
+    const reopened = connect(); await reopened.formOptions(true);
+    await reopened.create(draft).catch(() => undefined);
+    expect(committed).toEqual([id(7)]);
+  } finally { clock.mockRestore(); }
+});
+
+test("saving the same fields on a newer ETag does not replay an older committed edit", async () => {
+  const { connect, send } = setup();
+  const normal = send.getMockImplementation()!;
+  const change = { description: "Mi cambio" };
+  const urlPath = path + "/" + movement;
+  let row = { id: movement, type: "expense", status: "confirmed", accountId: account,
+    amount: { currency: "KWD", amountMinor: "2500" }, occurredAt: "2026-11-01T15:00:00Z", description: "Café", version: 1 };
+  const replay = new Map<string, typeof row>();
+  send.mockImplementation(async (url, init) => {
+    if (new URL(url).pathname !== urlPath) return normal(url, init);
+    if (init.method === "GET") return replayReply(row, 200, '"' + row.version + '"');
+    const headers = new Headers(init.headers);
+    const key = headers.get("Idempotency-Key")!;
+    const saved = replay.get(key);
+    if (saved) return replayReply(saved, 200, '"' + saved.version + '"');
+    if (headers.get("If-Match") !== '"' + row.version + '"') return replayReply({}, 412);
+    row = { ...row, ...JSON.parse(String(init.body)), version: row.version + 1 };
+    replay.set(key, row);
+    if (row.version === 2) throw new Error("Reply lost after commit");
+    return replayReply(row, 200, '"' + row.version + '"');
+  });
+  await expect(connect().update(movement, '"1"', change)).rejects.toThrow();
+  expect(row).toMatchObject({ ...change, version: 2 });
+  row = { ...row, description: "Cambio remoto posterior", version: 3 };
+
+  const reopened = connect();
+  const latest = await reopened.detail(movement);
+  expect(latest.editable?.etag).toBe('"3"');
+  await expect(reopened.update(movement, latest.editable!.etag, change)).resolves.toBe(movement);
+  expect(row).toMatchObject({ ...change, version: 4 });
+  expect(replay.size).toBe(2);
+});
+
+const expiredWarning = "Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.";
+const hours23 = 23 * 60 * 60 * 1000;
+
+test("prompts just past 23 hours and creates a fresh key only on explicit confirmation", async () => {
+  const { connect, writes, pending, created } = setup({ loseReply: true });
+  let now = Date.UTC(2026, 10, 1);
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const first = await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
+    await newMovement(draft.amount);
+    expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos guardar el movimiento. Vuelve a intentarlo.");
+    await first.unmount();
+    now += hours23 + 1;
+    await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
+    await newMovement(draft.amount);
+    expect(await screen.findByRole("alert")).toHaveTextContent(expiredWarning);
+    expect(writes).toHaveLength(1); expect(pending()).toHaveLength(1); expect(created.size).toBe(1);
+    await press("Registrar de todos modos"); await screen.findByRole("button", { name: "Nuevo movimiento" });
+    expect(writes).toHaveLength(2); expect(writes[1].key).not.toBe(writes[0].key);
+    expect(writes[1]).toMatchObject({ body: writes[0].body, pending: true });
+    expect(pending()).toEqual([]); expect(created.size).toBe(2);
+  } finally { clock.mockRestore(); }
+});
+
+test("allows replay at exactly 23 hours without resaving or extending the original timestamp", async () => {
+  const { connect, writes, pending, created } = setup({ loseReply: true });
+  let now = Date.UTC(2026, 10, 1);
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const api = connect(); await api.formOptions(true);
+    await expect(api.create(draft)).rejects.toThrow();
+    expect(JSON.parse(pending()[0][1])).toEqual({ key: writes[0].key, createdAt: now });
+    now += hours23;
+    await api.create(draft);
+    expect(writes[1]).toEqual(writes[0]); expect(created.size).toBe(1); expect(pending()).toEqual([]);
+    expect(secure.setItemAsync).toHaveBeenCalledTimes(1);
+  } finally { clock.mockRestore(); }
+});
+
+test("does not silently resend pre-upgrade records whose age or original precondition is unknown", async () => {
+  const { connect, writes, pending } = setup();
+  const endpoint = `${path}/${movement}`, body = { description: "Mi cambio" };
+  const hash = require("node:crypto").createHash("sha256").update(JSON.stringify(["PATCH", endpoint, body])).digest("hex");
+  await secure.setItemAsync(`savia.ledger.v1.${workspace}.${profile}.${hash}`, id(7));
+  await expect(connect().update(movement, '"1"', body)).rejects.toThrow(expiredWarning);
+  expect(writes).toEqual([]); expect(pending().map(([, value]) => value)).toEqual([id(7)]);
+});
+
+test("a void retry against a newer precondition gets a new key", async () => {
+  const { connect, writes, remoteEdit } = setup();
+  const api = connect(); remoteEdit();
+  await expect(api.void(movement, '"1"', "motivo", true)).rejects.toMatchObject({ status: 412 });
+  await expect(api.void(movement, '"2"', "motivo", true)).resolves.toBe(movement);
+  expect(writes.map(({ match, body }) => [match, body])).toEqual([['"1"', { reason: "motivo" }], ['"2"', { reason: "motivo" }]]);
+  expect(writes[1].key).not.toBe(writes[0].key);
 });

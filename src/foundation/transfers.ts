@@ -1,6 +1,7 @@
 import { amountMinor, isDay, type ScopedRequest } from "./accounts";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { InvalidDraft } from "./identity-draft";
+import type { PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSubmission } from "./pending-submission";
 import type { Transactions } from "./transactions";
 import { uuid } from "./workspace-context";
@@ -89,7 +90,7 @@ export function createTransfers(request: ScopedRequest, workspaceId: string, acc
       currencies = new Map(accounts.map(({ id, currency }) => [id, currency]));
       return accounts;
     },
-    async submit(mode: unknown, input: unknown) {
+    async submit(mode: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
       const { path, body } = transferBody(mode, input, currencies);
       const workspace = uuid(workspaceId);
       if (!workspace) throw new TypeError();
@@ -99,7 +100,7 @@ export function createTransfers(request: ScopedRequest, workspaceId: string, acc
           const result = object(await operation(key)), id = uuid(result.id);
           if (!id || uuid(result.sourceAccountId) !== body.sourceAccountId || uuid(result.destinationAccountId) !== body.destinationAccountId) throw new TypeError();
           return id;
-        }),
+        }, { confirmation }),
       });
       const id = uuid(result);
       if (!id) throw new TypeError();

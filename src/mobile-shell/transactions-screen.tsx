@@ -2,9 +2,9 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { InvalidDraft } from "../foundation/identity-draft";
 import { type Filters, type LedgerDraft, type Transactions, statuses, types } from "../foundation/transactions";
-import { TransportError } from "../foundation/transport";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
   const colors = paletteFor(useColorScheme());
@@ -39,21 +39,8 @@ function Field({ label, value, change, disabled }: { label: string; value: strin
 }
 
 const conflictMessage = "El movimiento cambió. Recarga sus datos antes de volver a intentarlo.";
-function useWrite() {
-  const lock = useRef(false);
-  const [busy, setBusy] = useState(false), [error, setError] = useState("");
-  async function run(operation: () => Promise<void>, fallback = "No pudimos guardar el movimiento. Vuelve a intentarlo.") {
-    if (lock.current) return;
-    lock.current = true; setBusy(true);
-    try { await operation(); setError(""); }
-    catch (failure) {
-      setError(failure instanceof InvalidDraft ? failure.message : failure instanceof TransportError && failure.kind === "http" && failure.status === 412 ? conflictMessage : fallback);
-    } finally { lock.current = false; setBusy(false); }
-  }
-  return { run, busy, error, clear: () => setError("") };
-}
 
-function Editor({ api, baseline, blocked, save, back }: { api: Transactions; baseline?: LedgerDraft; blocked: boolean; save: (draft: LedgerDraft) => void; back: () => void }) {
+function Editor({ api, baseline, blocked, cancelDisabled, save, back }: { api: Transactions; baseline?: LedgerDraft; blocked: boolean; cancelDisabled: boolean; save: (draft: LedgerDraft) => void; back: () => void }) {
   const creating = baseline === undefined;
   const [draft, setDraft] = useState<LedgerDraft>({});
   const [options, setOptions] = useState<Awaited<ReturnType<Transactions["formOptions"]>> | null>();
@@ -82,7 +69,7 @@ function Editor({ api, baseline, blocked, save, back }: { api: Transactions; bas
         action={() => { const tags = values.tagIds ?? []; choose("tagIds", tags.includes(id) ? tags.filter((tag) => tag !== id) : [...tags, id].sort()); }} />)}
       <AuthAction label={creating ? "Crear movimiento" : "Guardar cambios"} disabled={blocked || (!creating && !Object.keys(draft).length)} action={() => save(draft)} />
     </>}
-    <AuthAction label="Cancelar" disabled={blocked} action={back} />
+    <AuthAction label="Cancelar" disabled={cancelDisabled} action={back} />
   </>;
 }
 
@@ -90,8 +77,9 @@ function Detail({ api, id, back, changed }: { api: Transactions; id: string; bac
   const [data, setData] = useState<Awaited<ReturnType<Transactions["detail"]>> | null>();
   const [attempt, retry] = useState(0);
   const [mode, setMode] = useState<"edit" | "void">(), [reason, setReason] = useState("");
-  const { run, busy, error, clear } = useWrite();
-  const blocked = busy || error === conflictMessage;
+  const { run, busy, error, confirm, clear } = usePendingWrite(conflictMessage);
+  const cancelDisabled = busy || error === conflictMessage;
+  const blocked = cancelDisabled || !!confirm;
   const reload = () => { setData(undefined); retry((n) => n + 1); };
   const finish = () => { setMode(undefined); changed(); reload(); };
   const cancel = () => { setMode(undefined); setReason(""); clear(); };
@@ -111,18 +99,19 @@ function Detail({ api, id, back, changed }: { api: Transactions; id: string; bac
         {data.splits.length > 0 && <Copy>Divisiones</Copy>}
         {data.splits.map(({ category, amount, tags, notes }, index) => <View key={index}><Copy>{category} · {amount}</Copy>
           {tags.length > 0 && <Copy>{tags.join(", ")}</Copy>}{notes && <Copy>{notes}</Copy>}</View>)}
-        {data.editable && (mode === "edit" ? <Editor api={api} baseline={data.editable.fields} blocked={blocked} back={cancel}
-          save={(draft) => void run(async () => { await api.update(id, data.editable!.etag, draft); finish(); })} /> : mode === "void" && data.editable.canVoid ? <>
+        {data.editable && (mode === "edit" ? <Editor api={api} baseline={data.editable.fields} blocked={blocked} cancelDisabled={cancelDisabled} back={cancel}
+          save={(draft) => void run(async (confirmation) => { await api.update(id, data.editable!.etag, draft, confirmation); finish(); })} /> : mode === "void" && data.editable.canVoid ? <>
           <Copy role="header">Confirmar anulación</Copy><Copy>Se registrará una operación compensatoria; el movimiento no se elimina. Escribe un motivo de 3 a 500 caracteres.</Copy>
           <Field label="Motivo de anulación" value={reason} change={setReason} disabled={blocked} />
-          <AuthAction label="Confirmar anulación" disabled={blocked} action={() => void run(async () => { await api.void(id, data.editable!.etag, reason, true); finish(); }, "No pudimos anular el movimiento. Vuelve a intentarlo.")} />
-          <AuthAction label="Cancelar" disabled={blocked} action={cancel} />
+          <AuthAction label="Confirmar anulación" disabled={blocked} action={() => void run(async (confirmation) => { await api.void(id, data.editable!.etag, reason, true, confirmation); finish(); }, "No pudimos anular el movimiento. Vuelve a intentarlo.")} />
+          <AuthAction label="Cancelar" disabled={cancelDisabled} action={cancel} />
         </> : <>
           <AuthAction label="Editar movimiento" disabled={busy} action={() => setMode("edit")} />
           {data.editable.canVoid && <AuthAction label="Anular movimiento" disabled={busy} action={() => { setReason(""); setMode("void"); }} />}
         </>)}
       </>}
     {error && <Copy role="alert">{error}</Copy>}
+    {confirm && <AuthAction label={confirmPendingLabel} action={confirm} disabled={busy} />}
     {error === conflictMessage && <AuthAction label="Recargar movimiento" disabled={busy} action={() => void run(async () => {
       try { setData(await api.detail(id)); } catch { throw new InvalidDraft(conflictMessage); }
     })} />}
@@ -138,7 +127,7 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
   const [applied, setApplied] = useState<Filters>({});
   const [visible, setVisible] = useState<string>();
   const [creating, create] = useState(startCreating);
-  const write = useWrite();
+  const write = usePendingWrite();
   const changed = useRef(false);
   const [page, setPage] = useState(emptyPage);
   const [busy, setBusy] = useState(true);
@@ -168,10 +157,11 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     setDraft((old) => { const next = { ...old }; if (value === undefined) delete next[key]; else next[key] = value; return next; });
   }
   if (creating) return <AuthPanel>
-    <Editor api={api} blocked={write.busy} back={() => { create(false); write.clear(); }} save={(draft) => void write.run(async () => {
-      await api.create(draft); create(false); void load(applied);
+    <Editor api={api} blocked={write.busy || !!write.confirm} cancelDisabled={write.busy} back={() => { create(false); write.clear(); }} save={(draft) => void write.run(async (confirmation) => {
+      await api.create(draft, confirmation); create(false); void load(applied);
     })} />
     {write.error && <Copy role="alert">{write.error}</Copy>}
+    {write.confirm && <AuthAction label={confirmPendingLabel} action={write.confirm} disabled={write.busy} />}
   </AuthPanel>;
   if (visible) return <AuthPanel><Detail key={visible} api={api} id={visible} changed={() => { changed.current = true; }} back={() => {
     setVisible(undefined); if (changed.current) { changed.current = false; void load(applied); }
