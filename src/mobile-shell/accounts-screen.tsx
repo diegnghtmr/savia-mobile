@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { type Accounts, statuses, types } from "../foundation/accounts";
 import { InvalidDraft } from "../foundation/identity-draft";
+import { TransportError } from "../foundation/transport";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
 
@@ -48,24 +49,80 @@ function List({ api, status, change, open }: { api: Accounts; status: Filter; ch
   </>;
 }
 
-function Detail({ api, id }: { api: Accounts; id: string }) {
+type AccountDetail = Awaited<ReturnType<Accounts["detail"]>>;
+function Detail({ api, id, back }: { api: Accounts; id: string; back: () => void }) {
   const [attempt, retry] = useState(0);
-  const [data, setData] = useState<Awaited<ReturnType<Accounts["detail"]>> | null>();
+  const [data, setData] = useState<AccountDetail | null>();
+  const reload = () => { setData(undefined); retry((n) => n + 1); };
   useEffect(() => {
     let current = true;
-    setData(undefined);
     void api.detail(id).then((value) => { if (current) setData(value); }, () => { if (current) setData(null); });
     return () => { current = false; };
   }, [api, id, attempt]);
-  if (data === null) return <><Copy role="alert">No pudimos cargar la cuenta.</Copy><AuthAction label="Reintentar" action={() => retry(attempt + 1)} /></>;
-  if (!data) return <Copy>Cargando cuenta…</Copy>;
-  const { account, confirmed, pending, available, reconciled, equivalent } = data;
+  if (data) return <LoadedDetail key={attempt} api={api} data={data} back={back} reload={reload} />;
   return <>
+    <AuthAction label="Volver a cuentas" action={back} />
+    {data === null ? <><Copy role="alert">No pudimos cargar la cuenta.</Copy><AuthAction label="Reintentar" action={reload} /></> : <Copy>Cargando cuenta…</Copy>}
+  </>;
+}
+
+const editFields = ["name", "institution", "maskedNumber", "description"] as const;
+type MetadataDraft = Partial<Record<typeof editFields[number], string> & { includeInNetWorth: boolean }>;
+function LoadedDetail({ api, data, back, reload }: { api: Accounts; data: AccountDetail; back: () => void; reload: () => void }) {
+  const { account, editable, confirmed, pending, available, reconciled, equivalent } = data;
+  const colors = paletteFor(useColorScheme());
+  const [mode, setMode] = useState<"detail" | "edit" | "close">("detail");
+  const [draft, setDraft] = useState<MetadataDraft>({});
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<{ message: string; conflict: boolean }>();
+  const lock = useRef(false);
+  const changeMode = (next: typeof mode) => { setMode(next); setFailure(undefined); setDraft({}); };
+  const original: MetadataDraft = { name: account.name, ...Object.fromEntries(account.metadata), includeInNetWorth: editable?.includeInNetWorth };
+  const changes = Object.fromEntries(Object.entries(draft).filter(([key, value]) => (original[key as keyof MetadataDraft] ?? "") !== value));
+  async function mutate(command: "edit" | "status" | "close") {
+    if (!editable || failure?.conflict || lock.current) return;
+    lock.current = true; setBusy(true); setFailure(undefined);
+    try {
+      if (command === "close") await api.close(account.id, editable.etag, mode === "close");
+      else await api.update(account.id, editable.etag, command === "edit" ? changes : { status: account.status === "active" ? "archived" : "active" });
+      reload();
+    } catch (error) {
+      const status = error instanceof TransportError && error.kind === "http" ? error.status : undefined;
+      setFailure({ conflict: status === 412, message: status === 412 ? "La cuenta cambió. Recarga sus datos antes de volver a intentarlo."
+        : error instanceof InvalidDraft ? error.message
+        : command !== "close" ? "No pudimos actualizar la cuenta. Vuelve a intentarlo."
+        : status === 409 ? "No pudimos cerrar la cuenta. Revisa su estado y los movimientos pendientes."
+        : "No pudimos cerrar la cuenta. Vuelve a intentarlo." });
+    } finally { lock.current = false; setBusy(false); }
+  }
+  const blocked = busy || failure?.conflict;
+  const carry = draft.includeInNetWorth ?? editable?.includeInNetWorth;
+  return <>
+    <AuthAction label="Volver a cuentas" action={back} disabled={busy} />
     <Copy role="header">{account.name}</Copy><Copy>{types[account.type]} · {statuses[account.status]} · {account.currency}</Copy>
     {account.metadata.map(([key, value]) => <Copy key={key}>{value}</Copy>)}
     <Copy>Saldo confirmado: {confirmed}</Copy><Copy>Saldo pendiente: {pending}</Copy><Copy>Saldo disponible: {available}</Copy><Copy>Saldo conciliado: {reconciled}</Copy>
     <Copy>Equivalente en moneda base: {equivalent}</Copy><Copy>Saldo al {data.asOf}</Copy>
     <Copy>Tasa: {data.rate} · {data.rateDate} · {data.rateSource}</Copy>
+    {editable && (mode === "edit" ? <>
+      <Copy role="header">Editar cuenta</Copy>
+      {editFields.map((key) => <View key={key}>
+        <Copy>{fields[key]}</Copy><TextInput accessibilityLabel={fields[key]} value={draft[key] ?? original[key] ?? ""} onChangeText={(value) => setDraft((old) => ({ ...old, [key]: value }))} editable={!blocked} style={{ minHeight: 44, padding: 12, color: colors.text, backgroundColor: colors.raised }} />
+      </View>)}
+      <AuthAction label="Incluir en el patrimonio" selected={carry} action={() => setDraft((old) => ({ ...old, includeInNetWorth: !carry }))} disabled={blocked} />
+      <AuthAction label="Guardar cambios" action={() => void mutate("edit")} disabled={blocked || !Object.keys(changes).length} />
+      <AuthAction label="Cancelar edición" action={() => changeMode("detail")} disabled={blocked} />
+    </> : mode === "close" ? <>
+      <Copy>¿Cerrar la cuenta {account.name}? No puedes reabrirla. Cerrar la cuenta no elimina sus movimientos.</Copy>
+      <AuthAction label="Confirmar cierre" action={() => void mutate("close")} disabled={blocked} />
+      <AuthAction label="Cancelar cierre" action={() => changeMode("detail")} disabled={blocked} />
+    </> : <>
+      <AuthAction label="Editar cuenta" action={() => changeMode("edit")} disabled={blocked} />
+      <AuthAction label={account.status === "active" ? "Archivar cuenta" : "Reactivar cuenta"} action={() => void mutate("status")} disabled={blocked} />
+      <AuthAction label="Cerrar cuenta" action={() => changeMode("close")} disabled={blocked} />
+    </>)}
+    {failure && <Copy role="alert">{failure.message}</Copy>}
+    {failure?.conflict && <AuthAction label="Recargar cuenta" action={reload} />}
   </>;
 }
 
@@ -108,9 +165,6 @@ export function AccountsScreen({ api, back }: { api: Accounts; back: () => void 
     {panel === "list" ? <>
       <Copy role="header">Cuentas</Copy><AuthAction label="Volver al resumen" action={back} />
       <AuthAction label="Nueva cuenta" action={() => show("create")} /><List key={status ?? "all"} api={api} status={status} change={change} open={open} />
-    </> : panel === "create" ? <Create api={api} open={open} back={() => show("list")} /> : <>
-      <AuthAction label="Volver a cuentas" action={() => show("list")} />
-      <Detail key={panel.id} api={api} id={panel.id} />
-    </>}
+    </> : panel === "create" ? <Create api={api} open={open} back={() => show("list")} /> : <Detail key={panel.id} api={api} id={panel.id} back={() => show("list")} />}
   </AuthPanel>;
 }

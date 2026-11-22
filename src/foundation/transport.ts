@@ -7,6 +7,7 @@ import { readProfileId, readWorkspaceContext, uuid } from "./workspace-context";
 const timeoutDefault = 10_000;
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
 type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string; successStatus?: number | readonly number[] };
+type WorkspaceOptions = { ifMatch?: string; includeETag?: boolean };
 export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unknown>;
 export type WithSession = <T>(operation: (request: SaviaRequest) => Promise<T>) => Promise<T>;
 
@@ -52,21 +53,25 @@ export function createTransport({
     if (!session) throw new TransportError("http", 401);
     return operation(session.accessToken);
   }
-  async function execute(token: string, path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}, workspaceId?: string) {
+  async function execute(token: string, path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }) {
     safePath(path);
     const headers: Record<string, string> = { Accept: "application/json, application/problem+json" };
     headers.Authorization = ["Bearer", token].join(" ");
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload !== undefined) headers["Content-Type"] = "application/json";
     if (idempotencyKey !== undefined) headers["Idempotency-Key"] = idempotencyKey;
-    if (workspaceId !== undefined) headers["X-Workspace-Id"] = workspaceId;
+    if (workspace) {
+      headers["X-Workspace-Id"] = workspace.id;
+      if (workspace.ifMatch !== undefined) headers["If-Match"] = workspace.ifMatch;
+    }
     return withDeadline(async (signal) => {
       const response = await send(origin + path, { method, headers, body: payload, signal, redirect: "error", credentials: "omit" });
       rejectRedirect(response);
       if (response.ok) {
         const expected = typeof successStatus === "number" ? [successStatus] : successStatus;
         if (expected && !expected.includes(response.status)) throw new TransportError("protocol", response.status);
-        return response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        const decoded: unknown = await response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        return workspace?.includeETag ? { body: decoded, etag: response.headers.get("etag") } : decoded;
       }
       const isProblem = /^application\/problem\+json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "");
       const code: unknown = isProblem ? (await response.json().catch(() => null))?.code : undefined;
@@ -82,7 +87,7 @@ export function createTransport({
       safePath(path);
       return withSession((request) => request(path, options));
     },
-    async requestInWorkspace(expected: unknown, path: string, options?: RequestInput) {
+    async requestInWorkspace(expected: unknown, path: string, options?: RequestInput & WorkspaceOptions) {
       safePath(path);
       const id = uuid(expected);
       if (!id) throw new Error(workspaceUnavailable);
@@ -90,7 +95,7 @@ export function createTransport({
         const request = bind(token);
         const context = await readWorkspaceContext(request, await readProfileId(request));
         if (context.active?.id !== id) throw new Error(workspaceUnavailable);
-        return execute(token, path, options, id);
+        return execute(token, path, options, { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag });
       });
     },
   };

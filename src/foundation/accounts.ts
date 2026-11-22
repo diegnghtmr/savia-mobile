@@ -70,6 +70,27 @@ function createBody(input: unknown) {
   } catch { throw new InvalidDraft("Revisa los datos de la cuenta."); }
 }
 
+const invalidAccount = () => new InvalidDraft("Revisa los datos de la cuenta.");
+const isETag = (value: unknown): value is string => typeof value === "string" && value.endsWith('"') && /^"(?:0|[1-9]\d{0,9})"$/.test(value) && Number(value.slice(1, -1)) <= 2_147_483_647;
+
+function updateBody(input: unknown) {
+  try {
+    const entries = Object.entries(record(input));
+    if (!entries.length) throw new TypeError();
+    return Object.fromEntries(entries.map(([key, value]) => {
+      if (key === "name") {
+        const name = text(value, 120);
+        if (name) return [key, name];
+      }
+      if (key === "includeInNetWorth" && typeof value === "boolean") return [key, value];
+      if (key === "status" && (value === "active" || value === "archived")) return [key, value];
+      const limit = textFields.find(([field]) => field === key)?.[1];
+      if (limit) return [key, value === null ? null : text(value, limit) || null];
+      throw new TypeError();
+    }));
+  } catch { throw invalidAccount(); }
+}
+
 function listQuery(input: unknown) {
   try {
     const query = record(input);
@@ -96,6 +117,7 @@ function parseAccount(input: unknown) {
 
 export function createAccounts(request: ScopedRequest, workspaceId: string, newKey = randomUUID) {
   const get = (path: string) => request(workspaceId, path, { successStatus: 200 });
+  const closeKeys = new Map<string, string>();
   const readBalance = async ({ id, currency }: ReturnType<typeof parseAccount>) => {
     const value = record(await get(`${accountsPath}/${id}/balance`));
     if (uuid(value.accountId) !== id || typeof value.asOf !== "string" || !Number.isFinite(Date.parse(value.asOf))) throw new TypeError();
@@ -121,14 +143,32 @@ export function createAccounts(request: ScopedRequest, workspaceId: string, newK
     async detail(raw: unknown) {
       const id = uuid(raw);
       if (!id) throw new InvalidDraft("Cuenta no válida.");
-      const account = parseAccount(await get(`${accountsPath}/${id}`));
+      const { body, etag } = record(await request(workspaceId, `${accountsPath}/${id}`, { successStatus: 200, includeETag: true }));
+      const account = parseAccount(body);
+      const { includeInNetWorth } = record(body);
       if (account.id !== id) throw new TypeError();
+      const editable = account.status !== "closed" && isETag(etag) && typeof includeInNetWorth === "boolean" ? { etag, includeInNetWorth } : null;
       const { value, confirmed, asOf } = await readBalance(account);
       const bucket = (name: string) => value[name] === undefined ? "No informado" : money(value[name], account.currency);
       const fx = record(value.baseCurrencyEquivalent);
       const { rate, rateDate, rateSource } = fx;
       if (money(fx.original, account.currency) !== confirmed || typeof rate !== "string" || !/^\d+(?:\.\d+)?$/.test(rate) || typeof rateDate !== "string" || !isDay(rateDate) || typeof rateSource !== "string" || !rateSource.trim()) throw new TypeError();
-      return { account, asOf, confirmed, pending: bucket("pendingBalance"), available: bucket("availableBalance"), reconciled: bucket("reconciledBalance"), equivalent: money(fx.converted), rate, rateDate, rateSource };
+      return { account, editable, asOf, confirmed, pending: bucket("pendingBalance"), available: bucket("availableBalance"), reconciled: bucket("reconciledBalance"), equivalent: money(fx.converted), rate, rateDate, rateSource };
+    },
+    async update(raw: unknown, etag: unknown, input: unknown) {
+      const id = uuid(raw);
+      if (!id || !isETag(etag)) throw invalidAccount();
+      const body = updateBody(input);
+      await request(workspaceId, `${accountsPath}/${id}`, { method: "PATCH", body, ifMatch: etag, successStatus: 200 });
+    },
+    async close(raw: unknown, etag: unknown, confirmed: unknown) {
+      const id = uuid(raw);
+      if (!id || !isETag(etag) || confirmed !== true) throw invalidAccount();
+      const draft = `${id}:${etag}`;
+      const idempotencyKey = closeKeys.get(draft) ?? uuid(newKey());
+      if (!idempotencyKey) throw new TypeError();
+      closeKeys.set(draft, idempotencyKey);
+      await request(workspaceId, `${accountsPath}/${id}/close`, { method: "POST", ifMatch: etag, idempotencyKey, successStatus: 200 });
     },
     draft() {
       const keys = new Map<string, string>();
