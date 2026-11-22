@@ -127,7 +127,7 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
   const [applied, setApplied] = useState<Filters>({});
   const [visible, setVisible] = useState<string>();
   const [creating, create] = useState(startCreating);
-  const write = usePendingWrite();
+  const write = usePendingWrite(undefined, () => create(false));
   const changed = useRef(false);
   const [page, setPage] = useState(emptyPage);
   const [busy, setBusy] = useState(true);
@@ -171,7 +171,8 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
   }} /></AuthPanel>;
   return <AuthPanel>
     <Copy role="header">Movimientos</Copy><AuthAction label="Volver al resumen" action={back} />
-    <AuthAction label="Nuevo movimiento" action={() => create(true)} disabled={busy} />
+    <AuthAction label="Nuevo movimiento" action={() => { write.clear(); create(true); }} disabled={busy} />
+    {write.error && <Copy role="alert">{write.error}</Copy>}
     <AuthAction label="Filtros" selected={showFilters} action={() => toggleFilters(!showFilters)} />
     {showFilters && <>
       {(Object.keys(chooseLabel) as Selection[]).map((field) => <AuthAction key={field} label={selected[field] ? `${chooseLabel[field]}: ${selected[field]}` : chooseLabel[field]} action={() => setPicker(field)} disabled={busy} />)}

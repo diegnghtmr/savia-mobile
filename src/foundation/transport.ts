@@ -2,7 +2,7 @@ import { fetch as expoFetch } from "expo/fetch";
 import { readApiOrigin } from "./config";
 import { workspaceUnavailable } from "./identity-draft";
 import { sessionStore, type SessionCredentials } from "./session-store";
-import { readProfileId, readWorkspaceContext, uuid } from "./workspace-context";
+import { readProfileId, readWorkspaceContext, uuid, type WorkspaceContext } from "./workspace-context";
 
 const timeoutDefault = 10_000;
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
@@ -10,7 +10,9 @@ type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string; 
 type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
-  submit?: (profileId: string, operation: (key: string) => Promise<unknown>) => Promise<unknown>;
+  expectedProfile?: string;
+  onMembership?: (context: WorkspaceContext) => Promise<void>;
+  submit?: (profileId: string, operation: (key: string) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
 };
 export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unknown>;
 export type WithSession = <T>(operation: (request: SaviaRequest) => Promise<T>) => Promise<T>;
@@ -22,6 +24,8 @@ export class TransportError extends Error {
   }
   toJSON() { return { kind: this.kind, status: this.status, code: this.code, message: this.message }; }
 }
+
+export const isOfflineFailure = (error: unknown) => error instanceof TransportError && (error.kind === "network" || error.kind === "timeout");
 
 async function withDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, ms: number, parent?: AbortSignal | null): Promise<T> {
   if (parent?.aborted) throw new TransportError("network");
@@ -57,7 +61,7 @@ export function createTransport({
     if (!session) throw new TransportError("http", 401);
     return operation(session.accessToken);
   }
-  async function execute(token: string, path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }) {
+  async function execute(token: string, path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }, onDate?: (date: number | null) => void) {
     safePath(path);
     const headers: Record<string, string> = { Accept: "application/json, application/problem+json" };
     headers.Authorization = ["Bearer", token].join(" ");
@@ -75,6 +79,11 @@ export function createTransport({
         const expected = typeof successStatus === "number" ? [successStatus] : successStatus;
         if (expected && !expected.includes(response.status)) throw new TransportError("protocol", response.status);
         const decoded: unknown = await response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        if (onDate) {
+          const header = response.headers.get("date");
+          const time = header === null ? NaN : Date.parse(header);
+          onDate(Number.isFinite(time) && new Date(time).toUTCString() === header ? time : null);
+        }
         return workspace?.includeETag ? { body: decoded, etag: response.headers.get("etag") } : decoded;
       }
       const isProblem = /^application\/problem\+json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "");
@@ -98,11 +107,16 @@ export function createTransport({
       return withBearer(async (token) => {
         const request = bind(token);
         const profileId = await readProfileId(request);
-        const context = await readWorkspaceContext(request, profileId);
+        if (options?.expectedProfile !== undefined && options.expectedProfile !== profileId) throw new Error(workspaceUnavailable);
+        let serverDate: number | null = null;
+        const membership: SaviaRequest = options?.submit
+          ? (page, input) => execute(token, page, input, undefined, (date) => { serverDate = date; }) : request;
+        const context = await readWorkspaceContext(membership, profileId);
+        await options?.onMembership?.(context);
         if (context.active?.id !== id) throw new Error(workspaceUnavailable);
         const scope = { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
         return options?.submit
-          ? options.submit(profileId, (idempotencyKey) => execute(token, path, { ...options, idempotencyKey }, scope))
+          ? options.submit(profileId, (idempotencyKey) => execute(token, path, { ...options, idempotencyKey }, scope), serverDate)
           : execute(token, path, options, scope);
       });
     },

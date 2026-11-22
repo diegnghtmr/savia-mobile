@@ -6,6 +6,7 @@ import NotFoundScreen from "../src/app/+not-found";
 jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn() }));
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
+jest.mock("../src/foundation/offline-cache", () => ({ createOffline: jest.fn(() => ({})) }));
 jest.mock("../src/foundation/transactions", () => ({ createTransactions: jest.fn() }));
 jest.mock("../src/foundation/transfers", () => ({ createTransfers: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));

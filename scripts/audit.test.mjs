@@ -30,6 +30,17 @@ test("accepts a growing app with network and Secure Store only at their boundari
   assert.deepEqual(await audit(app), { paths: 6 });
 });
 
+test("allows SQLite only behind its cipher adapter and the SQLCipher plugin", async (t) => {
+  const app = await fixture(t, {
+    "package.json": '{"dependencies":{"expo-sqlite":"~57.0.5"}}',
+    "app.json": '{"expo":{"plugins":[["expo-sqlite",{"useSQLCipher":true}]]}}',
+    "src/foundation/offline-db.ts": 'import { openDatabaseAsync } from "expo-sqlite";',
+  });
+  await assert.doesNotReject(audit(app));
+  await writeFile(join(app, "app.json"), '{"expo":{"plugins":[["expo-sqlite",{"useSQLCipher":true,"ios":{"useSQLCipher":false}}]]}}');
+  await assert.rejects(audit(app), /SQLCipher plugin required/);
+});
+
 test("audits the checked-out repository without an exact inventory", async () => {
   await assert.doesNotReject(audit());
 });
@@ -50,6 +61,7 @@ for (const [name, path, body, message] of [
   ["direct Secure Store", "src/app/index.tsx", 'import * as Store from "expo-secure-store";', "secure storage outside session store"],
   ["plain persistence", "src/foundation/session-store.ts", 'import Store from "@react-native-async-storage/async-storage";', "unapproved persistence"],
   ["plain files", "src/foundation/session-store.ts", 'import { File } from "expo-file-system";', "unapproved persistence"],
+  ["SQLite outside cipher adapter", "src/app/index.tsx", 'import { openDatabaseAsync } from "expo-sqlite";', "unapproved persistence"],
   ["service key reference", "src/foundation/transport.ts", 'const key = process.env.EXPO_PUBLIC_SUPABASE_SERVICE_ROLE_KEY;', "privileged Supabase credential"],
   ["secret literal", "src/foundation/transport.ts", 'const key = "sb_secret_fixture_not_a_real_key";', "embedded secret"],
   ["hardcoded password", "app.json", '{"password":"synthetic-fixture-value"}', "embedded secret"],

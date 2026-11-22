@@ -7,10 +7,10 @@ const root = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const ignored = new Set(["node_modules", ".tmp", ".expo", "coverage", ".git"]);
 const sourceFile = /\.(?:[cm]?[jt]sx?|json)$/i;
 const artifact = /\.(?:hbc|bin|png|jpe?g|gif|webp|aab|apk|mdx?)$|(?:^|\/)(?:requirements\.txt|CMakeLists\.txt|README\.sh)$/i;
-const testFile = /(?:^|\/)__tests__\/|(?:^|\/)jest\.setup\.ts$|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const testFile = /(?:^|\/)(?:__tests__|__mocks__)\/|(?:^|\/)jest\.setup\.ts$|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const network = /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|axios|superagent)\b/i;
 const supabase = /@supabase\/[\w-]+/gi;
-const plainStorage = /\b(?:async-storage|AsyncStorage|localStorage|sessionStorage|expo-file-system|react-native-fs|react-native-mmkv|expo-sqlite)\b|["'](?:node:)?fs(?:\/promises)?["']/i;
+const plainStorage = /\b(?:async-storage|AsyncStorage|localStorage|sessionStorage|expo-file-system|react-native-fs|react-native-mmkv)\b|["'](?:node:)?fs(?:\/promises)?["']/i;
 const serviceKey = /\b\w*(?:supabase\w*(?:service_?role|service_?key|secret_?key)|service_?role_?key)\w*\b|["'`]service_role["'`]/i;
 const secret = /\b(?:sb_secret_[\w-]+|svt_[\w-]{16,}|eyJ[\w-]+\.[\w-]+\.[\w-]+|sk_(?:live|test)_[\w-]+)\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:pass(?:word|wd)|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization)["']?\s*[:=]\s*["'`][^"'`\r\n]+["'`]/i;
 
@@ -50,6 +50,7 @@ export async function audit(target = root, parent = join(target, "..")) {
   });
   const files = (await walk(target)).map((path) => relative(target, path).split(sep).join("/")).sort();
   if (files.some((path) => artifact.test(path))) throw new Error("generated or documentation-like executable path rejected");
+  let sqlite = false;
   for (const path of files) {
     if (!sourceFile.test(path) || testFile.test(path) || path === "scripts/audit.mjs") continue;
     const source = await readFile(join(target, path), "utf8");
@@ -65,7 +66,18 @@ export async function audit(target = root, parent = join(target, "..")) {
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
     if ((appCode || appDependency) && plainStorage.test(text)) reject("unapproved persistence");
+    if (/\bexpo-sqlite\b/i.test(text)) {
+      if (appCode && path !== "src/foundation/offline-db.ts") reject("unapproved persistence");
+      if (appDependency || appCode) sqlite = true;
+    }
     if (findInsecureUrl(path, source)) reject("insecure HTTP URL");
+  }
+  if (sqlite) {
+    const { expo } = files.includes("app.json") ? JSON.parse(await readFile(join(target, "app.json"), "utf8")) : {};
+    const plugins = (expo?.plugins ?? []).filter((plugin) => plugin === "expo-sqlite" || plugin?.[0] === "expo-sqlite");
+    const config = plugins[0]?.[1];
+    if (plugins.length !== 1 || config?.useSQLCipher !== true || [config.android, config.ios].some((platform) =>
+      platform?.useSQLCipher !== undefined && platform.useSQLCipher !== true)) throw new Error("app.json: SQLCipher plugin required");
   }
   return { paths: files.length };
 }

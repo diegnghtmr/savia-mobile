@@ -29,13 +29,17 @@ function setup({ lostReply = false } = {}) {
   secure.setItemAsync.mockImplementation(async (slot, value) => { store.set(slot, value); });
   secure.deleteItemAsync.mockImplementation(async (slot) => { store.delete(slot); });
   const writes: { path: string; key: string; persisted: boolean; body: unknown }[] = [];
-  let member = true;
+  let member = true, membershipDate = new Date(Date.UTC(2026, 10, 1)).toUTCString();
   const read = jest.fn().mockResolvedValue({ accessToken: "fixture-bearer" });
   const send = jest.fn(async (url: string, init: RequestInit) => {
     const { pathname, searchParams } = new URL(url), headers = new Headers(init.headers);
     const reply = (body: unknown, status = 200) => ({ status, ok: status < 300, headers: new Headers(), redirected: false, json: async () => body });
     if (pathname === "/v1/me") return reply({ id: profile });
-    if (pathname === "/v1/workspaces") return reply(searchParams.has("cursor") ? page(member ? [{ id: workspace, name: "Casa" }] : []) : page([{ id: other, name: "Oficina" }], "next_ws"));
+    if (pathname === "/v1/workspaces") {
+      const response = reply(searchParams.has("cursor") ? page(member ? [{ id: workspace, name: "Casa" }] : []) : page([{ id: other, name: "Oficina" }], "next_ws"));
+      response.headers.set("Date", membershipDate);
+      return response;
+    }
     if (headers.get("X-Workspace-Id") !== workspace) return reply({}, 403);
     if (pathname === "/v1/accounts") return reply(searchParams.has("cursor") ? page([{ id: yen, name: "Viaje", currency: "JPY", status: "active" }]) : page([
       { id: source, name: "Efectivo", currency: "KWD", status: "active" }, { id: destination, name: "Ahorros", currency: "KWD", status: "active" },
@@ -58,7 +62,7 @@ function setup({ lostReply = false } = {}) {
     const scoped = createTransport({ baseUrl: "https://api.invalid", sessions: { read }, send }).requestInWorkspace;
     return createTransfers(scoped, workspace, createTransactions(scoped, workspace).transferAccounts);
   };
-  return { connect, read, send, writes, pending, records, revoke: () => { member = false; } };
+  return { connect, read, send, writes, pending, records, setMembershipDate: (date: string) => { membershipDate = date; }, revoke: () => { member = false; } };
 }
 
 test("rejects invalid drafts, account/currency mismatches, fees and invalid rate filters with no submission I/O", async () => {
@@ -114,7 +118,7 @@ test("offers a transfer and exchange form without fees and requires both receive
 });
 
 test.each(["transfer", "exchange"])("blocks an expired %s until explicit confirmation sends the same draft with a new key", async (mode) => {
-  const { connect, writes, records, pending } = setup({ lostReply: true });
+  const { connect, writes, records, pending, setMembershipDate } = setup({ lostReply: true });
   let now = Date.UTC(2026, 10, 1);
   const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
   const isExchange = mode === "exchange", submit = isExchange ? "Registrar cambio" : "Registrar transferencia";
@@ -128,7 +132,8 @@ test.each(["transfer", "exchange"])("blocks an expired %s until explicit confirm
     const first = await render(<TransfersScreen api={connect()} back={jest.fn()} />);
     await fill(); await press(submit);
     expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos registrar la operación. Vuelve a intentarlo.");
-    await first.unmount(); now += 23 * 60 * 60 * 1000 + 1;
+    await first.unmount(); now += 23 * 60 * 60 * 1000 + 1000;
+    setMembershipDate(new Date(now).toUTCString());
     await render(<TransfersScreen api={connect()} back={jest.fn()} />);
     await fill(); await press(submit);
     expect(await screen.findByRole("alert")).toHaveTextContent("Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.");
@@ -156,4 +161,43 @@ test("filters read-only rates and shows exact rate, source, effective time and a
   expect(Object.fromEntries(new URL(url).searchParams)).toEqual({ baseCurrency: "KWD", quoteCurrency: "JPY", from: "2026-11-01", to: "2026-11-02" });
   expect([init.method, new Headers(init.headers).get("X-Workspace-Id")]).toEqual(["GET", workspace]);
   expect(writes).toEqual([]);
+});
+
+// Reviewer regression (verify mwr5qq51). Append to __tests__/transfers.test.tsx.
+test.each(["transfer", "exchange"])("%s: clock correction does not allow a replay after backend retention", async mode => {
+  const { connect, send } = setup();
+  const normal = send.getMockImplementation()!;
+  const input = mode === "transfer" ? transfer : exchange;
+  const endpoint = mode === "transfer" ? "/v1/transfers" : "/v1/currency-exchanges";
+  const hours = 3_600_000;
+  let serverNow = Date.UTC(2026, 10, 1, 8), deviceNow = serverNow + 3 * hours;
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => deviceNow);
+  const committed: string[] = [];
+  const replay = new Map<string, { at: number; row: object }>();
+  let attempts = 0;
+  try {
+    send.mockImplementation(async (url, init) => {
+      const stamp = new Date(serverNow).toUTCString();
+      if (new URL(url).pathname !== endpoint || init.method !== "POST") {
+        const response = await normal(url, init); response.headers.set("Date", stamp); return response;
+      }
+      attempts++;
+      const token = new Headers(init.headers).get("Idempotency-Key")!;
+      const previous = replay.get(token);
+      const reply = (row: object) => ({ status: 201, ok: true, redirected: false, headers: new Headers({ Date: stamp }), json: async () => row });
+      if (previous && serverNow - previous.at < 24 * hours) return reply(previous.row);
+      const { sourceAccountId, destinationAccountId } = JSON.parse(String(init.body));
+      const row = { id: id(7 + committed.length), sourceAccountId, destinationAccountId };
+      committed.push(row.id); replay.set(token, { at: serverNow, row });
+      if (committed.length === 1) throw new Error("Reply lost after commit");
+      return reply(row);
+    });
+    const first = connect(); await first.loadAccounts();
+    await expect(first.submit(mode, input)).rejects.toMatchObject({ kind: "network" });
+    serverNow += 25 * hours; deviceNow = serverNow;
+    const reopened = connect(); await reopened.loadAccounts();
+    const outcome = await reopened.submit(mode, input).then(() => "resolved", (error: Error) => error.message);
+    expect({ committed, attempts, outcome }).toEqual({ committed: [id(7)], attempts: 1,
+      outcome: "Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo." });
+  } finally { clock.mockRestore(); }
 });

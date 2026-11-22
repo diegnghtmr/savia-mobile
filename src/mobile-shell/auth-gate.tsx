@@ -45,7 +45,7 @@ function RecoveryForm({ identity, busy, submit }: { identity: Identity; busy: bo
 
 const unauthorized = (error: unknown) => error instanceof TransportError && error.kind === "http" && error.status === 401;
 type Route = "loading" | "sign-in" | "onboarding" | "workspace" | "retry";
-export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace) => ReactNode) }) {
+export function AuthGate({ auth, identity, home, beforeSignOut }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace, profile: string) => ReactNode); beforeSignOut?: () => Promise<void> }) {
   const colors = paletteFor(useColorScheme());
   const [route, setRoute] = useState<Route>("loading");
   const [context, setContext] = useState<WorkspaceContext | null>(null);
@@ -99,11 +99,11 @@ export function AuthGate({ auth, identity, home }: { auth: () => Auth; identity:
       await check();
     }, "No pudimos continuar. Verifica tus datos e inténtalo de nuevo.");
   }
-  const signOut = () => void run(async () => { await auth().signOut(); setContext(null); setRoute("sign-in"); }, "No pudimos cerrar la sesión.");
+  const signOut = () => void run(async () => { await beforeSignOut?.(); await auth().signOut(); setContext(null); setRoute("sign-in"); }, "No pudimos cerrar la sesión.");
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
   if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
     <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>
-    {typeof home === "function" ? home(context.active) : home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
+    {typeof home === "function" ? home(context.active, context.profileId) : home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
   </View>;
   const title = route === "sign-in" ? (signup ? "Crear cuenta" : "Iniciar sesión") : route === "onboarding" ? "Completa tu perfil" : route === "workspace" ? (context?.items.length ? "Elige un espacio" : "No tienes espacios disponibles") : route === "retry" ? "No pudimos verificar tu perfil" : "Verificando tu perfil…";
   const field = { minHeight: 44, padding: 12, backgroundColor: colors.raised, color: colors.text };

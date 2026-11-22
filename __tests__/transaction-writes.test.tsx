@@ -25,7 +25,7 @@ function setup({ loseReply = false } = {}) {
   secure.getItemAsync.mockImplementation(async (key) => storage.get(key) ?? null);
   secure.setItemAsync.mockImplementation(async (key, value) => { storage.set(key, value); });
   secure.deleteItemAsync.mockImplementation(async (key) => { storage.delete(key); });
-  let member = true;
+  let member = true, membershipDate: string | null | undefined;
   let row = { id: movement, type: "expense", status: "confirmed", accountId: account, amount: { currency: "KWD", amountMinor: "2500" }, occurredAt: "2026-11-01T15:00:00Z", description: "Café", version: 1 };
   const writes: { method: string; url: string; key: string | null; match: string | null; body: unknown; pending: boolean }[] = [];
   const read = jest.fn().mockResolvedValue({ accessToken: "fixture-bearer" });
@@ -33,7 +33,11 @@ function setup({ loseReply = false } = {}) {
     const { pathname } = new URL(url), headers = new Headers(init.headers);
     const reply = (data: unknown, status = 200, etag?: string) => ({ status, ok: status < 300, redirected: false, headers: new Headers(etag ? { ETag: etag } : {}), json: async () => data });
     if (pathname === "/v1/me") return reply({ id: profile });
-    if (pathname === "/v1/workspaces") return reply(page(member ? [{ id: workspace, name: "Casa" }] : []));
+    if (pathname === "/v1/workspaces") {
+      const response = reply(page(member ? [{ id: workspace, name: "Casa" }] : []));
+      if (membershipDate !== null) response.headers.set("Date", membershipDate ?? new Date(Date.now()).toUTCString());
+      return response;
+    }
     if (headers.get("X-Workspace-Id") !== workspace) return reply({}, 403);
     if (init.method === "GET") {
       if (pathname === path) return reply(page([row]));
@@ -53,7 +57,7 @@ function setup({ loseReply = false } = {}) {
     return reply(row);
   });
   const connect = () => createTransactions(createTransport({ baseUrl: "https://api.invalid", send, sessions: { read } }).requestInWorkspace, workspace);
-  return { connect, read, send, writes, pending, created, revoke: () => { member = false; }, remoteEdit: () => { row = { ...row, description: "Cambio remoto", version: 2 }; } };
+  return { connect, read, send, writes, pending, created, setMembershipDate: (value: string | null) => { membershipDate = value; }, revoke: () => { member = false; }, remoteEdit: () => { row = { ...row, description: "Cambio remoto", version: 2 }; } };
 }
 
 async function newMovement(amount: string) {
@@ -207,36 +211,34 @@ test("saving the same fields on a newer ETag does not replay an older committed 
 const expiredWarning = "Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.";
 const hours23 = 23 * 60 * 60 * 1000;
 
-test("prompts just past 23 hours and creates a fresh key only on explicit confirmation", async () => {
-  const { connect, writes, pending, created } = setup({ loseReply: true });
-  let now = Date.UTC(2026, 10, 1);
-  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
-  try {
-    const first = await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
-    await newMovement(draft.amount);
-    expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos guardar el movimiento. Vuelve a intentarlo.");
-    await first.unmount();
-    now += hours23 + 1;
-    await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
-    await newMovement(draft.amount);
-    expect(await screen.findByRole("alert")).toHaveTextContent(expiredWarning);
-    expect(writes).toHaveLength(1); expect(pending()).toHaveLength(1); expect(created.size).toBe(1);
-    await press("Registrar de todos modos"); await screen.findByRole("button", { name: "Nuevo movimiento" });
-    expect(writes).toHaveLength(2); expect(writes[1].key).not.toBe(writes[0].key);
-    expect(writes[1]).toMatchObject({ body: writes[0].body, pending: true });
-    expect(pending()).toEqual([]); expect(created.size).toBe(2);
-  } finally { clock.mockRestore(); }
+test("prompts at exactly 23 server hours and creates a fresh key only on explicit confirmation", async () => {
+  const { connect, writes, pending, created, setMembershipDate } = setup({ loseReply: true });
+  setMembershipDate(new Date(Date.UTC(2026, 10, 1)).toUTCString());
+  const first = await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
+  await newMovement(draft.amount);
+  expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos guardar el movimiento. Vuelve a intentarlo.");
+  await first.unmount();
+  setMembershipDate(new Date(Date.UTC(2026, 10, 1) + hours23).toUTCString());
+  await render(<TransactionsScreen api={connect()} back={jest.fn()} />);
+  await newMovement(draft.amount);
+  expect(await screen.findByRole("alert")).toHaveTextContent(expiredWarning);
+  expect(writes).toHaveLength(1); expect(pending()).toHaveLength(1); expect(created.size).toBe(1);
+  await press("Registrar de todos modos"); await screen.findByRole("button", { name: "Nuevo movimiento" });
+  expect(writes).toHaveLength(2); expect(writes[1].key).not.toBe(writes[0].key);
+  expect(writes[1]).toMatchObject({ body: writes[0].body, pending: true });
+  expect(pending()).toEqual([]); expect(created.size).toBe(2);
 });
 
-test("allows replay at exactly 23 hours without resaving or extending the original timestamp", async () => {
-  const { connect, writes, pending, created } = setup({ loseReply: true });
-  let now = Date.UTC(2026, 10, 1);
-  const clock = jest.spyOn(Date, "now").mockImplementation(() => now);
+test("replays just below 23 server hours without extending the original timestamp", async () => {
+  const { connect, writes, pending, created, setMembershipDate } = setup({ loseReply: true });
+  const start = Date.UTC(2026, 10, 1);
+  const clock = jest.spyOn(Date, "now").mockReturnValue(start + 2 * hours23);
+  setMembershipDate(new Date(start).toUTCString());
   try {
     const api = connect(); await api.formOptions(true);
     await expect(api.create(draft)).rejects.toThrow();
-    expect(JSON.parse(pending()[0][1])).toEqual({ key: writes[0].key, createdAt: now });
-    now += hours23;
+    expect(JSON.parse(pending()[0][1])).toMatchObject({ key: writes[0].key, createdAt: start });
+    setMembershipDate(new Date(start + hours23 - 1000).toUTCString());
     await api.create(draft);
     expect(writes[1]).toEqual(writes[0]); expect(created.size).toBe(1); expect(pending()).toEqual([]);
     expect(secure.setItemAsync).toHaveBeenCalledTimes(1);
@@ -259,4 +261,72 @@ test("a void retry against a newer precondition gets a new key", async () => {
   await expect(api.void(movement, '"2"', "motivo", true)).resolves.toBe(movement);
   expect(writes.map(({ match, body }) => [match, body])).toEqual([['"1"', { reason: "motivo" }], ['"2"', { reason: "motivo" }]]);
   expect(writes[1].key).not.toBe(writes[0].key);
+});
+
+test.each([
+  [null, "Sun, 01 Nov 2026 00:00:00 GMT"], ["invalid", "Sun, 01 Nov 2026 00:00:00 GMT"],
+  ["Sun, 01 Nov 2026 00:00:00 GMT", null], ["Sun, 01 Nov 2026 00:00:00 GMT", "0"],
+  ["Sun, 01 Nov 2026 00:00:00 GMT", "Sat, 31 Oct 2026 23:59:59 GMT"],
+])("does not replay with unusable membership dates: %s, %s", async (first, retry) => {
+  const { connect, writes, pending, created, setMembershipDate } = setup({ loseReply: true });
+  const api = connect(); await api.formOptions(true);
+  setMembershipDate(first);
+  await expect(api.create(draft)).rejects.toMatchObject({ kind: "network" });
+  const original = pending();
+  setMembershipDate(retry);
+  await expect(api.create(draft)).rejects.toThrow(expiredWarning);
+  expect(writes).toHaveLength(1); expect(created.size).toBe(1); expect(pending()).toEqual(original);
+});
+
+test("treats pre-upgrade device timestamps as unknown", async () => {
+  const { connect, writes, pending, created } = setup({ loseReply: true });
+  const api = connect(); await api.formOptions(true);
+  await expect(api.create(draft)).rejects.toMatchObject({ kind: "network" });
+  const [[slot]] = pending();
+  const record = JSON.stringify({ key: writes[0].key, createdAt: Date.now() });
+  await secure.setItemAsync(slot, record);
+  await expect(api.create(draft)).rejects.toThrow(expiredWarning);
+  expect(writes).toHaveLength(1); expect(created.size).toBe(1); expect(pending()).toEqual([[slot, record]]);
+});
+
+// Reviewer regression (verify mwr5qq51). Append to __tests__/transaction-writes.test.tsx.
+test("a device clock correction cannot silently replay a create after the server window", async () => {
+  const { connect, send } = setup();
+  const normal = send.getMockImplementation()!;
+  const hour = 60 * 60 * 1000;
+  let serverNow = Date.UTC(2026, 10, 1, 8);
+  let deviceNow = serverNow + 3 * hour;
+  const clock = jest.spyOn(Date, "now").mockImplementation(() => deviceNow);
+  const committed: string[] = [];
+  const replay = new Map<string, { at: number; id: string }>();
+  let postCount = 0;
+  try {
+    send.mockImplementation(async (url, init) => {
+      const stamp = new Date(serverNow).toUTCString();
+      if (new URL(url).pathname !== path || init.method !== "POST") {
+        const response = await normal(url, init);
+        response.headers.set("Date", stamp);
+        return response;
+      }
+      postCount++;
+      const token = new Headers(init.headers).get("Idempotency-Key")!;
+      const previous = replay.get(token);
+      const reply = (row: { id: string }) => ({ status: 201, ok: true, redirected: false,
+        headers: new Headers({ Date: stamp }), json: async () => ({ id: row.id }) });
+      if (previous && serverNow - previous.at < 24 * hour) return reply(previous);
+      const current = { at: serverNow, id: id(7 + committed.length) };
+      replay.set(token, current); committed.push(current.id);
+      if (committed.length === 1) throw new Error("Reply lost after commit");
+      return reply(current);
+    });
+    const first = connect(); await first.formOptions(true);
+    await expect(first.create(draft)).rejects.toMatchObject({ kind: "network" });
+    expect(committed).toEqual([id(7)]);
+    serverNow += 25 * hour;
+    deviceNow = serverNow; // Corrected: only 22 hours elapsed on the device clock.
+    const reopened = connect(); await reopened.formOptions(true);
+    const outcome = await reopened.create(draft).then(() => "resolved", (error: Error) => error.message);
+    expect({ committed, postCount, outcome }).toEqual({ committed: [id(7)], postCount: 1,
+      outcome: "Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo." });
+  } finally { clock.mockRestore(); }
 });

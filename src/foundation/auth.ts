@@ -3,7 +3,8 @@ import { CryptoDigestAlgorithm, digest, getRandomValues } from "expo-crypto";
 import { Platform } from "react-native";
 import { readApiOrigin } from "./config";
 import { secureStorage } from "./session-store";
-import { authNetwork } from "./transport";
+import { authNetwork, TransportError } from "./transport";
+import { uuid } from "./workspace-context";
 
 export interface Auth {
   signIn(email: string, password: string): Promise<void>;
@@ -12,6 +13,7 @@ export interface Auth {
   refreshSession(): Promise<boolean>;
   exchangeCode(code: string): Promise<void>;
   readSession(): Promise<{ accessToken: string } | null>;
+  localPrincipal?(): Promise<string | null>;
 }
 
 function isPublicKey(key: string): boolean {
@@ -69,10 +71,16 @@ export function createAuth(url = process.env.EXPO_PUBLIC_SUPABASE_URL, key = pro
       const { data, error } = await auth.exchangeCodeForSession(code);
       if (error || !data.session) throw new Error("Email confirmation failed");
     },
+    async localPrincipal() {
+      const raw = await secureStorage.getItem(storageKey);
+      if (raw === null) return null;
+      try { return uuid(JSON.parse(raw)?.user?.id); } catch { return null; }
+    },
     async readSession() {
       const { data, error } = await auth.getSession();
       if (error) {
         if (error.name === "AuthSessionMissingError" || ["session_not_found", "refresh_token_not_found", "refresh_token_already_used"].includes(error.code ?? "")) return null;
+        if (error.name === "AuthRetryableFetchError" && !error.status) throw new TransportError("network");
         throw new Error("Session recovery failed");
       }
       return data.session ? { accessToken: data.session.access_token } : null;

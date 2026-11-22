@@ -1,0 +1,64 @@
+import { getRandomBytesAsync } from "expo-crypto";
+import { openDatabaseAsync, type SQLiteDatabase } from "expo-sqlite";
+import { secureStorage } from "./session-store";
+
+const keySlot = "savia.offline.key.v1";
+let loadingKey: Promise<string> | undefined;
+function databaseKey() {
+  return loadingKey ??= (async () => {
+    let key = await secureStorage.getItem(keySlot);
+    if (key === null) {
+      key = Array.from(await getRandomBytesAsync(32), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      await secureStorage.setItem(keySlot, key);
+    }
+    if (!/^[a-f\d]{64}$/.test(key)) throw new Error("Invalid database key");
+    return key;
+  })().finally(() => { loadingKey = undefined; });
+}
+
+const migrations = [
+  `CREATE TABLE membership (principal TEXT PRIMARY KEY, profile TEXT NOT NULL, snapshot TEXT NOT NULL);
+   CREATE TABLE cache (principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL,
+     path TEXT NOT NULL, payload TEXT NOT NULL, saved_at INTEGER NOT NULL,
+     PRIMARY KEY (principal, profile, workspace, path));`,
+  `CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL,
+     path TEXT NOT NULL, body TEXT NOT NULL, slot TEXT NOT NULL, key TEXT NOT NULL, queued_at INTEGER NOT NULL,
+     record TEXT, issue TEXT, UNIQUE (principal, profile, workspace, slot));`,
+];
+
+export async function atomic<T>(db: SQLiteDatabase, operation: () => Promise<T>) {
+  await db.execAsync("BEGIN IMMEDIATE");
+  try {
+    const result = await operation();
+    await db.execAsync("COMMIT");
+    return result;
+  } catch (error) { await db.execAsync("ROLLBACK"); throw error; }
+}
+
+async function open() {
+  const db = await openDatabaseAsync("savia-offline.db", { useNewConnection: true });
+  try {
+    if (!(await db.getFirstAsync<{ cipher_version: string }>("PRAGMA cipher_version"))?.cipher_version) throw new Error("SQLCipher unavailable");
+    await db.execAsync(`PRAGMA key = "x'${await databaseKey()}'"`);
+    await db.execAsync("PRAGMA secure_delete = ON; PRAGMA temp_store = MEMORY");
+    await atomic(db, async () => {
+      const version = (await db.getFirstAsync<{ user_version: number }>("PRAGMA user_version"))?.user_version;
+      if (version === undefined || version < 0 || version > migrations.length) throw new Error("Unsupported offline schema");
+      for (let v = version; v < migrations.length; v++) await db.execAsync(`${migrations[v]} PRAGMA user_version = ${v + 1};`);
+    });
+    return db;
+  } catch { await db.closeAsync().catch(() => {}); throw new Error("Encrypted offline storage unavailable"); }
+}
+
+let serial: Promise<unknown> = Promise.resolve();
+export function offlineStore() {
+  let connection: Promise<SQLiteDatabase> | undefined;
+  return <T>(operation: (db: SQLiteDatabase) => Promise<T>) => {
+    const result = serial.then(async () => {
+      connection ??= open().catch((error) => { connection = undefined; throw error; });
+      return operation(await connection);
+    });
+    serial = result.catch(() => {});
+    return result;
+  };
+}

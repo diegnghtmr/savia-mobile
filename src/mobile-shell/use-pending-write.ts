@@ -1,11 +1,11 @@
 import { useRef, useState } from "react";
 import { InvalidDraft } from "../foundation/identity-draft";
-import { PendingSubmissionExpired } from "../foundation/pending-expiry";
+import { OutboxQueued, PendingSubmissionExpired } from "../foundation/pending-expiry";
 import { TransportError } from "../foundation/transport";
 
 export const confirmPendingLabel = "Registrar de todos modos";
 
-export function usePendingWrite(conflictMessage?: string) {
+export function usePendingWrite(conflictMessage?: string, onQueued?: () => void) {
   const lock = useRef(false);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [confirm, setConfirm] = useState<() => void>();
@@ -19,6 +19,8 @@ export function usePendingWrite(conflictMessage?: string) {
       if (failure instanceof PendingSubmissionExpired) {
         setError(failure.message);
         setConfirm(() => () => void run(operation, fallback, failure));
+      } else if (failure instanceof OutboxQueued) {
+        onQueued?.(); setError(failure.message);
       } else setError(failure instanceof InvalidDraft ? failure.message
         : conflictMessage && failure instanceof TransportError && failure.kind === "http" && failure.status === 412 ? conflictMessage : fallback);
     } finally { lock.current = false; setBusy(false); }

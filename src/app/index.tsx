@@ -4,34 +4,39 @@ import { useState } from "react";
 import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
 import { createIdentity } from "../foundation/identity";
+import { createOffline } from "../foundation/offline-cache";
 import { createTransactions } from "../foundation/transactions";
 import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
+import { OfflineBanner } from "../mobile-shell/offline-banner";
+import { OutboxPanel } from "../mobile-shell/outbox-panel";
 import { paletteFor } from "../mobile-shell/tokens";
 import { TransactionsScreen } from "../mobile-shell/transactions-screen";
 import { TransfersScreen } from "../mobile-shell/transfers-screen";
 
 const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
-const identity = createIdentity((operation) => transport().withSession(operation));
+const offline = createOffline(createIdentity((operation) => transport().withSession(operation)), () => getAuth().localPrincipal?.() ?? Promise.resolve(null));
 
 export default function Index() {
-  return <AuthGate auth={getAuth} identity={identity} home={({ id }) => <WorkspaceHome key={id} id={id} />} />;
+  return <AuthGate auth={getAuth} identity={offline.identity} beforeSignOut={offline.beforeSignOut}
+    home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} />} />;
 }
 
-function WorkspaceHome({ id }: { id: string }) {
+function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
   const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers">("home");
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const [apis] = useState(() => {
-    const scoped: ReturnType<typeof createTransport>["requestInWorkspace"] = (...args) => transport().requestInWorkspace(...args);
-    const transactions = createTransactions(scoped, id);
-    return { accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(scoped, id, transactions.transferAccounts) };
+    const scoped = offline.scope(profile, id, (...args) => transport().requestInWorkspace(...args), (at) => setSavedAt((old) => Math.min(old ?? at, at)));
+    const box = offline.outbox(profile, id, scoped), transactions = createTransactions(box.request, id);
+    return { box, accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(box.request, id, transactions.transferAccounts) };
   });
   const back = () => show("home");
-  if (route === "accounts") return <AccountsScreen api={apis.accounts} back={back} />;
-  if (route === "transactions" || route === "new-transaction") return <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />;
-  if (route === "transfers") return <TransfersScreen api={apis.transfers} back={back} />;
-  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} />;
+  return <><OfflineBanner savedAt={savedAt} /><OutboxPanel box={apis.box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} back={back} />
+    : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />
+    : route === "transfers" ? <TransfersScreen api={apis.transfers} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} />}</>;
 }
 
 type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void };

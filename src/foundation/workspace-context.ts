@@ -3,7 +3,7 @@ import { secureStorage } from "./session-store";
 import type { SaviaRequest } from "./transport";
 
 export type Workspace = { id: string; name: string };
-export type WorkspaceContext = { active: Workspace | null; items: Workspace[] };
+export type WorkspaceContext = { profileId: string; active: Workspace | null; items: Workspace[] };
 const endpoint = "/v1/workspaces";
 const slot = (profileId: string) => `savia.workspace.${profileId}`;
 export const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.toLowerCase() : null;
@@ -39,5 +39,5 @@ export async function readWorkspaceContext(request: SaviaRequest, profileId: str
     if (!active) throw new Error(workspaceUnavailable);
     await secureStorage.setItem(slot(profileId), active.id);
   }
-  return { active, items: [...workspaces.values()] };
+  return { profileId, active, items: [...workspaces.values()] };
 }

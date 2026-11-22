@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { InvalidDraft } from "../foundation/identity-draft";
+import { OutboxQueued } from "../foundation/pending-expiry";
 import type { RateFilters, TransferDraft, TransferMode, Transfers } from "../foundation/transfers";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
@@ -77,7 +78,8 @@ export function TransfersScreen({ api, back }: { api: Transfers; back: () => voi
   function submit(draft: TransferDraft, complete: () => void) {
     void run(async (confirmation) => {
       setNotice("");
-      await api.submit(mode, draft, confirmation);
+      try { await api.submit(mode, draft, confirmation); }
+      catch (error) { if (error instanceof OutboxQueued) complete(); throw error; }
       complete();
       setNotice(mode === "transfer" ? "Transferencia registrada." : "Cambio de moneda registrado.");
     }, "No pudimos registrar la operación. Vuelve a intentarlo.");

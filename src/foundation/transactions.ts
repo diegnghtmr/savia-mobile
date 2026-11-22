@@ -2,6 +2,7 @@ import { amountMinor, isETag, money, type ScopedRequest } from "./accounts";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
+import { creationReceipt } from "./ledger-create";
 import type { PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSubmission } from "./pending-submission";
 import { uuid } from "./workspace-context";
@@ -112,12 +113,13 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
   let accountCurrencies = new Map<string, string>();
   async function write(method: "POST" | "PATCH", path: string, body: object, confirmation?: PendingSubmissionExpired, expected?: string, ifMatch?: string) {
     const result = await request(workspaceId, path, { method, body, ifMatch, successStatus: expected ? 200 : 201,
-      submit: (profile, operation) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
+      submit: (profile, operation, serverDate) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
         const saved = object(await operation(key));
+        if (!expected) return creationReceipt(path, body, saved);
         const id = requiredId(saved.id);
         if ((expected && id !== expected) || (path.endsWith("/void") && saved.status !== "voided")) throw new TypeError();
         return id;
-      }, { ifMatch, confirmation }),
+      }, { ifMatch, confirmation, serverDate }),
     });
     return requiredId(result);
   }

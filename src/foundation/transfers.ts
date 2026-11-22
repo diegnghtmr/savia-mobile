@@ -1,6 +1,7 @@
 import { amountMinor, isDay, type ScopedRequest } from "./accounts";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { InvalidDraft } from "./identity-draft";
+import { creationReceipt } from "./ledger-create";
 import type { PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSubmission } from "./pending-submission";
 import type { Transactions } from "./transactions";
@@ -96,11 +97,9 @@ export function createTransfers(request: ScopedRequest, workspaceId: string, acc
       if (!workspace) throw new TypeError();
       const method = "POST";
       const result = await request(workspace, path, { method, body, successStatus: 201,
-        submit: (profile, operation) => pendingSubmission(workspace, profile, JSON.stringify([method, path, body]), async (key) => {
-          const result = object(await operation(key)), id = uuid(result.id);
-          if (!id || uuid(result.sourceAccountId) !== body.sourceAccountId || uuid(result.destinationAccountId) !== body.destinationAccountId) throw new TypeError();
-          return id;
-        }, { confirmation }),
+        submit: (profile, operation, serverDate) => pendingSubmission(workspace, profile, JSON.stringify([method, path, body]), async (key) => {
+          return creationReceipt(path, body, object(await operation(key)));
+        }, { confirmation, serverDate }),
       });
       const id = uuid(result);
       if (!id) throw new TypeError();
