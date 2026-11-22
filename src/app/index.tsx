@@ -19,18 +19,19 @@ export default function Index() {
 }
 
 function WorkspaceHome({ id }: { id: string }) {
-  const [route, show] = useState<"home" | "accounts" | "transactions">("home");
+  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction">("home");
   const [apis] = useState(() => {
     const scoped: ReturnType<typeof createTransport>["requestInWorkspace"] = (...args) => transport().requestInWorkspace(...args);
     return { accounts: createAccounts(scoped, id), transactions: createTransactions(scoped, id) };
   });
   const back = () => show("home");
   if (route === "accounts") return <AccountsScreen api={apis.accounts} back={back} />;
-  if (route === "transactions") return <TransactionsScreen api={apis.transactions} back={back} />;
-  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} />;
+  if (route === "transactions" || route === "new-transaction") return <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />;
+  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} />;
 }
 
-export function HomeScreen({ openAccounts, openTransactions }: { openAccounts?: () => void; openTransactions?: () => void } = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -42,9 +43,10 @@ export function HomeScreen({ openAccounts, openTransactions }: { openAccounts?: 
         </View>
         <Text style={[styles.body, { color: colors.muted }]}>Todavía no hay información financiera disponible.</Text>
         <Text style={[styles.body, { color: colors.text }]}>Cuando exista una fuente autorizada, vas a verla acá.</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.raised }]}>
-          <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>
-        </Pressable>
+        {registerMovement ? <AuthAction label="Registrar movimiento" action={registerMovement} /> :
+          <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.raised }]}>
+            <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>
+          </Pressable>}
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
         {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
       </ScrollView>

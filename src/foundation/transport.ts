@@ -7,7 +7,11 @@ import { readProfileId, readWorkspaceContext, uuid } from "./workspace-context";
 const timeoutDefault = 10_000;
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
 type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string; successStatus?: number | readonly number[] };
-type WorkspaceOptions = { ifMatch?: string; includeETag?: boolean };
+type WorkspaceOptions = {
+  ifMatch?: string;
+  includeETag?: boolean;
+  submit?: (profileId: string, operation: (key: string) => Promise<unknown>) => Promise<unknown>;
+};
 export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unknown>;
 export type WithSession = <T>(operation: (request: SaviaRequest) => Promise<T>) => Promise<T>;
 
@@ -93,9 +97,13 @@ export function createTransport({
       if (!id) throw new Error(workspaceUnavailable);
       return withBearer(async (token) => {
         const request = bind(token);
-        const context = await readWorkspaceContext(request, await readProfileId(request));
+        const profileId = await readProfileId(request);
+        const context = await readWorkspaceContext(request, profileId);
         if (context.active?.id !== id) throw new Error(workspaceUnavailable);
-        return execute(token, path, options, { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag });
+        const scope = { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
+        return options?.submit
+          ? options.submit(profileId, (idempotencyKey) => execute(token, path, { ...options, idempotencyKey }, scope))
+          : execute(token, path, options, scope);
       });
     },
   };

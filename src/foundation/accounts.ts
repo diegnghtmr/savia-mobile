@@ -25,7 +25,7 @@ const three = new Set("BHD IQD JOD KWD LYD OMR TND".split(" "));
 // ISO 4217 minor units; TRD §22.1 uses two digits for COP.
 const scale = (currency: string) => zero.has(currency) ? 0 : three.has(currency) ? 3 : 2;
 
-function amountMinor(value: string, currency: string) {
+export function amountMinor(value: string, currency: string) {
   const match = /^(-?)(\d+)(?:[.,](\d+))?$/.exec(value);
   const digits = scale(currency);
   if (!match || (match[3]?.length ?? 0) > digits) throw new TypeError();
@@ -71,7 +71,7 @@ function createBody(input: unknown) {
 }
 
 const invalidAccount = () => new InvalidDraft("Revisa los datos de la cuenta.");
-const isETag = (value: unknown): value is string => typeof value === "string" && value.endsWith('"') && /^"(?:0|[1-9]\d{0,9})"$/.test(value) && Number(value.slice(1, -1)) <= 2_147_483_647;
+export const isETag = (value: unknown): value is string => typeof value === "string" && value.endsWith('"') && /^"(?:0|[1-9]\d{0,9})"$/.test(value) && Number(value.slice(1, -1)) <= 2_147_483_647;
 
 function updateBody(input: unknown) {
   try {

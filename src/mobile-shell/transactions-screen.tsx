@@ -1,7 +1,8 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { InvalidDraft } from "../foundation/identity-draft";
-import { type Filters, type Transactions, statuses } from "../foundation/transactions";
+import { type Filters, type LedgerDraft, type Transactions, statuses, types } from "../foundation/transactions";
+import { TransportError } from "../foundation/transport";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
 
@@ -31,17 +32,77 @@ function Picker({ api, field, choose, back }: { api: Transactions; field: Select
   </>;
 }
 
-function Detail({ api, id, back }: { api: Transactions; id: string; back: () => void }) {
+function Field({ label, value, change, disabled }: { label: string; value: string; change: (value: string) => void; disabled: boolean }) {
+  const colors = paletteFor(useColorScheme());
+  return <View><Copy>{label}</Copy><TextInput accessibilityLabel={label} value={value} editable={!disabled} onChangeText={change}
+    style={{ minHeight: 44, padding: 12, color: colors.text, backgroundColor: colors.raised }} /></View>;
+}
+
+const conflictMessage = "El movimiento cambió. Recarga sus datos antes de volver a intentarlo.";
+function useWrite() {
+  const lock = useRef(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  async function run(operation: () => Promise<void>, fallback = "No pudimos guardar el movimiento. Vuelve a intentarlo.") {
+    if (lock.current) return;
+    lock.current = true; setBusy(true);
+    try { await operation(); setError(""); }
+    catch (failure) {
+      setError(failure instanceof InvalidDraft ? failure.message : failure instanceof TransportError && failure.kind === "http" && failure.status === 412 ? conflictMessage : fallback);
+    } finally { lock.current = false; setBusy(false); }
+  }
+  return { run, busy, error, clear: () => setError("") };
+}
+
+function Editor({ api, baseline, blocked, save, back }: { api: Transactions; baseline?: LedgerDraft; blocked: boolean; save: (draft: LedgerDraft) => void; back: () => void }) {
+  const creating = baseline === undefined;
+  const [draft, setDraft] = useState<LedgerDraft>({});
+  const [options, setOptions] = useState<Awaited<ReturnType<Transactions["formOptions"]>> | null>();
+  useEffect(() => {
+    let current = true;
+    void api.formOptions(creating).then((value) => { if (current) setOptions(value); }, () => { if (current) setOptions(null); });
+    return () => { current = false; };
+  }, [api, creating]);
+  const values = { ...baseline, ...draft };
+  function choose<K extends keyof LedgerDraft>(key: K, value: LedgerDraft[K]) {
+    setDraft((prev) => { const next = { ...prev, [key]: value }; if (JSON.stringify(value) === JSON.stringify(baseline?.[key])) delete next[key]; return next; });
+  }
+  const choices = (key: "type" | "accountId" | "categoryId" | "payeeId", title: string, names: Iterable<[string, string]>, empty?: string) => <>
+    <Copy>{title}</Copy>{empty && <AuthAction label={empty} action={() => choose(key, null)} selected={!values[key]} disabled={blocked} />}
+    {Array.from(names, ([id, name]) => <AuthAction key={id} label={name} action={() => choose(key, id)} selected={id === values[key]} disabled={blocked} />)}
+  </>;
+  return <>
+    <Copy role="header">{creating ? "Nuevo movimiento" : "Editar movimiento"}</Copy>
+    {options === null ? <Copy role="alert">No pudimos cargar las opciones del movimiento.</Copy> : !options ? <Copy>Cargando opciones…</Copy> : <>
+      {creating && <>{choices("type", "Tipo", Object.entries(types))}{choices("accountId", "Cuenta", options.accounts)}
+        <Field label="Importe" value={values.amount ?? ""} change={(text) => choose("amount", text)} disabled={blocked} /></>}
+      <Field label="Fecha (AAAA-MM-DD, UTC)" value={values.date ?? ""} change={(text) => choose("date", text)} disabled={blocked} />
+      <Field label="Descripción" value={values.description ?? ""} change={(text) => choose("description", text)} disabled={blocked} />
+      {choices("categoryId", "Categoría", options.categories, "Sin categoría")}{choices("payeeId", "Contraparte", options.payees, "Sin contraparte")}
+      <Copy>Etiquetas</Copy>{Array.from(options.tags, ([id, name]) => <AuthAction key={id} label={name} disabled={blocked} selected={values.tagIds?.includes(id) ?? false}
+        action={() => { const tags = values.tagIds ?? []; choose("tagIds", tags.includes(id) ? tags.filter((tag) => tag !== id) : [...tags, id].sort()); }} />)}
+      <AuthAction label={creating ? "Crear movimiento" : "Guardar cambios"} disabled={blocked || (!creating && !Object.keys(draft).length)} action={() => save(draft)} />
+    </>}
+    <AuthAction label="Cancelar" disabled={blocked} action={back} />
+  </>;
+}
+
+function Detail({ api, id, back, changed }: { api: Transactions; id: string; back: () => void; changed: () => void }) {
   const [data, setData] = useState<Awaited<ReturnType<Transactions["detail"]>> | null>();
   const [attempt, retry] = useState(0);
+  const [mode, setMode] = useState<"edit" | "void">(), [reason, setReason] = useState("");
+  const { run, busy, error, clear } = useWrite();
+  const blocked = busy || error === conflictMessage;
+  const reload = () => { setData(undefined); retry((n) => n + 1); };
+  const finish = () => { setMode(undefined); changed(); reload(); };
+  const cancel = () => { setMode(undefined); setReason(""); clear(); };
   useEffect(() => {
     let current = true;
     void api.detail(id).then((value) => { if (current) setData(value); }, () => { if (current) setData(null); });
     return () => { current = false; };
   }, [api, id, attempt]);
   return <>
-    <AuthAction label="Volver a movimientos" action={back} />
-    {data === null ? <><Copy role="alert">No pudimos cargar el movimiento.</Copy><AuthAction label="Reintentar" action={() => { setData(undefined); retry((n) => n + 1); }} /></>
+    <AuthAction label="Volver a movimientos" action={back} disabled={busy} />
+    {data === null ? <><Copy role="alert">No pudimos cargar el movimiento.</Copy><AuthAction label="Reintentar" action={reload} /></>
       : !data ? <Copy>Cargando movimiento…</Copy> : <>
         <Copy role="header">{data.title}</Copy><Copy>{data.type} · {data.status}</Copy><Copy>{data.occurredAt}</Copy><Copy>{data.amount}</Copy>
         {data.equivalent && <Copy>Equivalente en moneda base: {data.equivalent}</Copy>}
@@ -50,11 +111,25 @@ function Detail({ api, id, back }: { api: Transactions; id: string; back: () => 
         {data.splits.length > 0 && <Copy>Divisiones</Copy>}
         {data.splits.map(({ category, amount, tags, notes }, index) => <View key={index}><Copy>{category} · {amount}</Copy>
           {tags.length > 0 && <Copy>{tags.join(", ")}</Copy>}{notes && <Copy>{notes}</Copy>}</View>)}
+        {data.editable && (mode === "edit" ? <Editor api={api} baseline={data.editable.fields} blocked={blocked} back={cancel}
+          save={(draft) => void run(async () => { await api.update(id, data.editable!.etag, draft); finish(); })} /> : mode === "void" && data.editable.canVoid ? <>
+          <Copy role="header">Confirmar anulación</Copy><Copy>Se registrará una operación compensatoria; el movimiento no se elimina. Escribe un motivo de 3 a 500 caracteres.</Copy>
+          <Field label="Motivo de anulación" value={reason} change={setReason} disabled={blocked} />
+          <AuthAction label="Confirmar anulación" disabled={blocked} action={() => void run(async () => { await api.void(id, data.editable!.etag, reason, true); finish(); }, "No pudimos anular el movimiento. Vuelve a intentarlo.")} />
+          <AuthAction label="Cancelar" disabled={blocked} action={cancel} />
+        </> : <>
+          <AuthAction label="Editar movimiento" disabled={busy} action={() => setMode("edit")} />
+          {data.editable.canVoid && <AuthAction label="Anular movimiento" disabled={busy} action={() => { setReason(""); setMode("void"); }} />}
+        </>)}
       </>}
+    {error && <Copy role="alert">{error}</Copy>}
+    {error === conflictMessage && <AuthAction label="Recargar movimiento" disabled={busy} action={() => void run(async () => {
+      try { setData(await api.detail(id)); } catch { throw new InvalidDraft(conflictMessage); }
+    })} />}
   </>;
 }
 
-export function TransactionsScreen({ api, back }: { api: Transactions; back: () => void }) {
+export function TransactionsScreen({ api, back, startCreating = false }: { api: Transactions; back: () => void; startCreating?: boolean }) {
   const colors = paletteFor(useColorScheme());
   const [showFilters, toggleFilters] = useState(false);
   const [picker, setPicker] = useState<Selection>();
@@ -62,6 +137,9 @@ export function TransactionsScreen({ api, back }: { api: Transactions; back: () 
   const [draft, setDraft] = useState<Filters>({ limit: "20" });
   const [applied, setApplied] = useState<Filters>({});
   const [visible, setVisible] = useState<string>();
+  const [creating, create] = useState(startCreating);
+  const write = useWrite();
+  const changed = useRef(false);
   const [page, setPage] = useState(emptyPage);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
@@ -89,12 +167,21 @@ export function TransactionsScreen({ api, back }: { api: Transactions; back: () 
   function change(key: keyof Filters, value?: string) {
     setDraft((old) => { const next = { ...old }; if (value === undefined) delete next[key]; else next[key] = value; return next; });
   }
-  if (visible) return <AuthPanel><Detail key={visible} api={api} id={visible} back={() => setVisible(undefined)} /></AuthPanel>;
+  if (creating) return <AuthPanel>
+    <Editor api={api} blocked={write.busy} back={() => { create(false); write.clear(); }} save={(draft) => void write.run(async () => {
+      await api.create(draft); create(false); void load(applied);
+    })} />
+    {write.error && <Copy role="alert">{write.error}</Copy>}
+  </AuthPanel>;
+  if (visible) return <AuthPanel><Detail key={visible} api={api} id={visible} changed={() => { changed.current = true; }} back={() => {
+    setVisible(undefined); if (changed.current) { changed.current = false; void load(applied); }
+  }} /></AuthPanel>;
   if (picker) return <AuthPanel><Picker api={api} field={picker} back={() => setPicker(undefined)} choose={(id, name) => {
     setSelected((old) => ({ ...old, [picker]: name })); change(picker, id); setPicker(undefined);
   }} /></AuthPanel>;
   return <AuthPanel>
     <Copy role="header">Movimientos</Copy><AuthAction label="Volver al resumen" action={back} />
+    <AuthAction label="Nuevo movimiento" action={() => create(true)} disabled={busy} />
     <AuthAction label="Filtros" selected={showFilters} action={() => toggleFilters(!showFilters)} />
     {showFilters && <>
       {(Object.keys(chooseLabel) as Selection[]).map((field) => <AuthAction key={field} label={selected[field] ? `${chooseLabel[field]}: ${selected[field]}` : chooseLabel[field]} action={() => setPicker(field)} disabled={busy} />)}

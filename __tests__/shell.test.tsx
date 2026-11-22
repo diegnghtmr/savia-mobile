@@ -38,6 +38,13 @@ test("keeps the finance action disabled and inert", async () => {
   expect(screen.queryByText(/éxito|guardado|enviado/i)).toBeNull();
 });
 
+test("starts a new movement from the authenticated summary", async () => {
+  const register = jest.fn();
+  await render(<HomeScreen registerMovement={register} />);
+  await fireEvent.press(screen.getByRole("button", { name: "Registrar movimiento" }));
+  expect(register).toHaveBeenCalledTimes(1);
+});
+
 test("opens movements without changing the existing accounts action", async () => {
   const accounts = jest.fn(), transactions = jest.fn();
   await render(<HomeScreen openAccounts={accounts} openTransactions={transactions} />);

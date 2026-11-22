@@ -1,10 +1,12 @@
-import { money, type ScopedRequest } from "./accounts";
+import { amountMinor, isETag, money, type ScopedRequest } from "./accounts";
+import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
+import { pendingSubmission } from "./pending-submission";
 import { uuid } from "./workspace-context";
 
 export const statuses = { draft: "Borrador", pending: "Pendiente", confirmed: "Confirmada", reconciled: "Conciliada", voided: "Anulada" } as const;
-const types = { income: "Ingreso", expense: "Gasto", adjustment: "Ajuste", refund: "Reembolso", debt_payment: "Pago de deuda", fund_contribution: "Aporte a fondo" } as const;
+export const types = { income: "Ingreso", expense: "Gasto", adjustment: "Ajuste", refund: "Reembolso", debt_payment: "Pago de deuda", fund_contribution: "Aporte a fondo" } as const;
 const isMember = <T extends object>(table: T, key: unknown): key is keyof T => typeof key === "string" && Object.hasOwn(table, key);
 const isDate = (value: string) => /^(?!0000)\d{4}-\d{2}-\d{2}$/.test(value) && new Date(`${value}T00:00:00Z`).toJSON()?.slice(0, 10) === value;
 const endpoint = "/v1/transactions";
@@ -30,6 +32,41 @@ const optionalText = (value: unknown) => {
   if (typeof value !== "string") throw new TypeError();
   return value;
 };
+
+const metadata = ["date", "categoryId", "payeeId", "description", "tagIds"] as const;
+export type LedgerDraft = Partial<Record<"date" | "description" | "categoryId" | "payeeId" | "type" | "amount" | "accountId", string | null> & { tagIds: string[] }>;
+const invalidMovement = () => new InvalidDraft("Revisa los datos del movimiento.");
+const cleanText = (raw: unknown, max: number) => {
+  if (typeof raw !== "string" || raw.includes("\0") || [...raw.trim()].length > max) throw new TypeError();
+  return raw.trim();
+};
+function writeBody(input: unknown, currencies?: Map<string, string>) {
+  try {
+    const draft = object(input), keys = Object.keys(draft);
+    const allowed = currencies ? [...metadata, "type", "accountId", "amount"] : metadata;
+    if (!keys.length || keys.some((key) => !(allowed as readonly string[]).includes(key))) throw new TypeError();
+    const body: Record<string, unknown> = currencies ? { categoryId: null, payeeId: null, description: null, tagIds: [] } : {};
+    if (currencies) {
+      const accountId = requiredId(draft.accountId), currency = currencies.get(accountId);
+      if (!currency || !isMember(types, draft.type) || !Object.hasOwn(draft, "date")) throw new TypeError();
+      Object.assign(body, { accountId, type: draft.type, amount: { currency, amountMinor: amountMinor(cleanText(draft.amount, 64), currency) } });
+    }
+    for (const key of metadata) {
+      if (!Object.hasOwn(draft, key)) continue;
+      const value = draft[key];
+      if (key === "date") {
+        if (typeof value !== "string" || !isDate(value)) throw new TypeError();
+        body.occurredAt = `${value}T00:00:00.000Z`;
+      } else if (key === "tagIds") {
+        const tags = array(value).map(requiredId).sort();
+        if (new Set(tags).size !== tags.length) throw new TypeError();
+        body.tagIds = tags;
+      } else if (key === "description") body.description = value === null ? null : cleanText(value, 500) || null;
+      else body[key] = value === null ? null : requiredId(value);
+    }
+    return body;
+  } catch { throw invalidMovement(); }
+}
 
 function queryFor(input: unknown) {
   try {
@@ -71,18 +108,31 @@ function transaction(input: unknown) {
 
 export function createTransactions(request: ScopedRequest, workspaceId: string) {
   const get = (path: string) => request(workspaceId, path, { successStatus: 200 });
-  async function catalog(kind: Catalog) {
+  let accountCurrencies = new Map<string, string>();
+  async function write(method: "POST" | "PATCH", path: string, body: object, expected?: string, ifMatch?: string) {
+    const result = await request(workspaceId, path, { method, body, ifMatch, successStatus: expected ? 200 : 201,
+      submit: (profile, operation) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
+        const saved = object(await operation(key));
+        const id = requiredId(saved.id);
+        if ((expected && id !== expected) || (path.endsWith("/void") && saved.status !== "voided")) throw new TypeError();
+        return id;
+      }),
+    });
+    return requiredId(result);
+  }
+  async function catalog(kind: Catalog, currencies?: Map<string, string>) {
     const workspace = kind === "accounts" ? undefined : requiredId(workspaceId);
     const params = new URLSearchParams({ limit: "200" }), names = new Map<string, string>(), seen = new Set<string>();
     for (;;) {
       const { items, nextCursor } = parsePage(await get(`/v1/${kind}?${params}`), (value) => {
-        const { id, name } = object(value);
+        const { id, name, currency, status } = object(value);
         if (typeof name !== "string" || !name.trim()) throw new TypeError();
-        return { id: requiredId(id), name };
+        return { id: requiredId(id), name, currency, status };
       }, params.get("cursor"), workspace);
-      for (const { id, name } of items) {
+      for (const { id, name, currency, status } of items) {
         if (names.has(id)) throw new TypeError();
         names.set(id, name);
+        if (currencies && (status === "active" || status === "archived") && typeof currency === "string" && ACTIVE_CURRENCIES.has(currency)) currencies.set(id, currency);
       }
       if (!nextCursor) return names;
       if (seen.has(nextCursor)) throw new TypeError();
@@ -92,6 +142,26 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
   }
   return {
     options: (kind: "accounts" | "categories") => catalog(kind),
+    async formOptions(creating: boolean) {
+      const currencies = new Map<string, string>();
+      const [accounts, categories, payees, tags] = await Promise.all([creating ? catalog("accounts", currencies) : new Map<string, string>(), catalog("categories"), catalog("payees"), catalog("tags")]);
+      if (creating) accountCurrencies = currencies;
+      return { accounts: new Map([...currencies].map(([id, currency]) => [id, `${accounts.get(id)} (${currency})`])), categories, payees, tags };
+    },
+    async create(input: unknown) { return write("POST", endpoint, writeBody(input, accountCurrencies)); },
+    async update(raw: unknown, etag: unknown, input: unknown) {
+      const id = uuid(raw);
+      if (!id || !isETag(etag)) throw invalidMovement();
+      return write("PATCH", `${endpoint}/${id}`, writeBody(input), id, etag);
+    },
+    async void(raw: unknown, etag: unknown, value: unknown, confirmed: unknown) {
+      const id = uuid(raw);
+      if (!id || !isETag(etag) || confirmed !== true) throw invalidMovement();
+      let reason: string;
+      try { reason = cleanText(value, 500); if ([...reason].length < 3) throw new TypeError(); }
+      catch { throw new InvalidDraft("Escribe un motivo de 3 a 500 caracteres."); }
+      return write("POST", `${endpoint}/${id}/void`, { reason }, id, etag);
+    },
     async list(input: unknown = {}) {
       const params = queryFor(input);
       return parsePage(await get(`${endpoint}?${params}`), transaction, params.get("cursor"));
@@ -99,7 +169,8 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
     async detail(raw: unknown) {
       const id = uuid(raw);
       if (!id) throw new InvalidDraft("Movimiento no válido.");
-      const body = object(await get(`${endpoint}/${id}`));
+      const response = object(await request(workspaceId, `${endpoint}/${id}`, { successStatus: 200, includeETag: true }));
+      const body = object(response.body);
       const row = transaction(body);
       if (row.id !== id) throw new TypeError();
       const account = requiredId(body.accountId), category = body.categoryId == null ? null : requiredId(body.categoryId), payee = body.payeeId == null ? null : requiredId(body.payeeId);
@@ -116,7 +187,10 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
         payee ? catalog("payees") : null, tagIds.length || splits.some((split) => split.tags.length) ? catalog("tags") : null,
       ]);
       const label = (names: Map<string, string> | null, id: string) => names?.get(id) ?? "No disponible";
-      return { ...row, notes, equivalent, account: label(accounts, account), category: category && label(categories, category),
+      const editable = isETag(response.etag) && body.status !== "voided" && body.status !== "reconciled" ? {
+        etag: response.etag, canVoid: body.status !== "draft", fields: { date: row.occurredAt.slice(0, 10), categoryId: category, payeeId: payee, description: optionalText(body.description), tagIds },
+      } : null;
+      return { ...row, editable, notes, equivalent, account: label(accounts, account), category: category && label(categories, category),
         payee: payee && label(payees, payee), tags: tagIds.map((id) => label(tags, id)),
         splits: splits.map((split) => ({ ...split, category: label(categories, split.category), tags: split.tags.map((id) => label(tags, id)) })) };
     },
