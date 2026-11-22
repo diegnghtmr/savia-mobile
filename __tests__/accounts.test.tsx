@@ -22,10 +22,10 @@ const reply = (body: unknown, status = 200, etag?: string) => ({ status, ok: sta
 const input = { name: " Caja ", type: "cash", currency: "cop" };
 const secure = jest.mocked(SecureStore);
 beforeEach(() => { jest.resetAllMocks(); secure.getItemAsync.mockResolvedValue(workspace); });
-function setup({ omitETag = false, loseCloseResponse = false } = {}) {
+function setup({ omitETag = false, loseCloseResponse = false, accountType = account.type } = {}) {
   let member = true;
   let failCreate = false;
-  let current = { ...account, institution: "Banco" as string | null };
+  let current = { ...account, type: accountType, institution: "Banco" as string | null };
   let closeKey: string | null = null;
   const etag = () => `"${current.version}"`;
   const newKey = jest.fn().mockReturnValueOnce(id(4)).mockReturnValueOnce(id(5)).mockReturnValueOnce(id(6));
@@ -135,6 +135,17 @@ test("keeps the form recoverable after local rejection without an account reques
   expect(await screen.findByText("Revisa los datos de la cuenta.")).toBeTruthy();
   expect(read).toHaveBeenCalledTimes(before);
   expect(calls().filter(([, init]) => init.method === "POST")).toHaveLength(0);
+});
+
+test("recognizes informal_debt on account reads and as a creatable type", async () => {
+  const f = setup({ accountType: "informal_debt" });
+  await render(<AccountsScreen api={f.api} back={jest.fn()} />);
+  await press("Ahorros");
+  expect(await screen.findByText("Deuda informal · Activa · USD")).toBeTruthy();
+  await press("Volver a cuentas"); await press("Nueva cuenta"); await press("Deuda informal");
+  expect(screen.getByRole("button", { name: "Deuda informal", selected: true })).toBeTruthy();
+  await f.api.draft()({ ...input, type: "informal_debt" });
+  expect(JSON.parse(String(f.writes()[0][1].body))).toEqual({ name: "Caja", currency: "COP", type: "informal_debt" });
 });
 
 const invalidAccount = "Revisa los datos de la cuenta.";

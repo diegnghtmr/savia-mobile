@@ -4,6 +4,9 @@ import type { SaviaRequest } from "./transport";
 
 export type Workspace = { id: string; name: string };
 export type WorkspaceContext = { profileId: string; active: Workspace | null; items: Workspace[] };
+export class WorkspaceSelectionUnavailable extends Error {
+  constructor(readonly selection: string, readonly context: WorkspaceContext) { super(workspaceUnavailable); }
+}
 const endpoint = "/v1/workspaces";
 const slot = (profileId: string) => `savia.workspace.${profileId}`;
 export const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.toLowerCase() : null;
@@ -35,9 +38,10 @@ export async function readWorkspaceContext(request: SaviaRequest, profileId: str
   }
   const saved = select ?? uuid(await secureStorage.getItem(slot(profileId)));
   const active = saved ? workspaces.get(saved) ?? null : null;
+  const context = { profileId, active, items: [...workspaces.values()] };
   if (select !== undefined) {
-    if (!active) throw new Error(workspaceUnavailable);
+    if (!active) throw new WorkspaceSelectionUnavailable(select, context);
     await secureStorage.setItem(slot(profileId), active.id);
   }
-  return { profileId, active, items: [...workspaces.values()] };
+  return context;
 }

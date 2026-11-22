@@ -210,3 +210,29 @@ test.each(["transaction", "transfer", "exchange"])(
     expect(await box.list()).toEqual([]);
   },
 );
+
+// Reviewer regression (verify mwr9bsco). Append to __tests__/outbox.test.ts.
+test("selecting a freshly revoked workspace hides its cached accounts and queued writes after reopening offline", async () => {
+  const f = fixture(), { ledger, service } = await f.ready();
+  f.change("offline");
+  await expect(ledger.create(tx)).rejects.toThrow(notice);
+
+  f.revoke();
+  f.change("online");
+  await expect(service.identity.select(workspace)).rejects.toThrow(
+    "Este espacio ya no está disponible.",
+  );
+
+  f.change("offline");
+  const reopened = f.open();
+  const [queued, accounts] = await Promise.all([
+    reopened.box.list(),
+    reopened.ledger.transferAccounts().then(() => "cached accounts exposed", () => "blocked"),
+  ]);
+
+  expect({ queued: queued.map(({ path }) => path), accounts, posts: f.posts }).toEqual({
+    queued: [],
+    accounts: "blocked",
+    posts: [],
+  });
+});

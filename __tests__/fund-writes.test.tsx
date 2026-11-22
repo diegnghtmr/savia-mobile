@@ -136,3 +136,42 @@ test("retains the key after an invalid contribution receipt and does not queue a
   f.disconnect(); await expect(writer.create(input)).rejects.toThrow(/Necesitas conexión/);
   expect(f.pending()).toEqual([]); expect(f.writes).toHaveLength(2);
 });
+
+// Reviewer regression (verify mwr9bsco). Append to __tests__/fund-writes.test.tsx.
+test.each(["create", "contribution"])(
+  "%s uses a single approval and rechecks server age after its reply is lost",
+  async (kind) => {
+    const f = setup(), writer = f.connect();
+    await writer.loadAccounts();
+    const send = (confirmation?: Parameters<typeof writer.create>[1]) =>
+      kind === "create" ? writer.create(input, confirmation)
+        : writer.contribute(fund, "KWD", contribution, confirmation);
+
+    f.lose();
+    await expect(send()).rejects.toThrow(/Necesitas conexión/);
+
+    f.advance(23 * hours);
+    const first = await send().catch(error => error);
+    expect(first.message).toMatch(/^Puede que este movimiento/);
+
+    f.lose();
+    await expect(send(first)).rejects.toThrow(/Necesitas conexión/);
+    expect(f.writes).toHaveLength(2);
+    expect(new Set(f.writes.map(({ key }) => key)).size).toBe(2);
+    expect(f.writes.every(({ persisted }) => persisted)).toBe(true);
+
+    f.advance(23 * hours);
+    await expect(send(first)).rejects.toThrow("Pending submission changed");
+    const second = await send().catch(error => error);
+    expect(second.message).toBe(first.message);
+
+    f.advance(2 * hours);
+    await expect(send()).rejects.toThrow(first.message);
+    expect(f.writes).toHaveLength(2);
+    expect(f.replay.size).toBe(2);
+
+    await expect(send(second)).resolves.toEqual(expect.any(String));
+    expect(new Set(f.writes.map(({ key }) => key)).size).toBe(3);
+    expect(f.pending()).toEqual([]);
+  },
+);

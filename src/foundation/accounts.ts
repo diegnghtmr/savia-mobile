@@ -5,7 +5,7 @@ import { InvalidDraft } from "./identity-draft";
 import { TransportError, type createTransport } from "./transport";
 import { uuid } from "./workspace-context";
 
-export const types = { cash: "Efectivo", savings: "Ahorros", checking: "Cuenta corriente", digital_wallet: "Billetera digital", credit_card: "Tarjeta de crédito", loan: "Préstamo", investment_manual: "Inversión manual", receivable: "Cuenta por cobrar", generic: "Genérica" } as const;
+export const types = { cash: "Efectivo", savings: "Ahorros", checking: "Cuenta corriente", digital_wallet: "Billetera digital", credit_card: "Tarjeta de crédito", loan: "Préstamo", investment_manual: "Inversión manual", receivable: "Cuenta por cobrar", generic: "Genérica", informal_debt: "Deuda informal" } as const;
 export const statuses = { active: "Activa", archived: "Archivada", closed: "Cerrada" } as const;
 const textFields = [["institution", 120], ["maskedNumber", 32], ["description", 500]] as const;
 const opening = ["openingBalance", "openingBalanceDate"] as const;

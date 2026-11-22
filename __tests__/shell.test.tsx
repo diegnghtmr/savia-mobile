@@ -7,6 +7,8 @@ jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn() }));
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
 jest.mock("../src/foundation/budgets", () => ({ createBudgets: jest.fn() }));
 jest.mock("../src/foundation/budget-writes", () => ({ createBudgetWrites: jest.fn() }));
+jest.mock("../src/foundation/debt-payments", () => ({ createDebtPayments: jest.fn() }));
+jest.mock("../src/foundation/debts", () => ({ createDebts: jest.fn() }));
 jest.mock("../src/foundation/funds", () => ({ createFunds: jest.fn() }));
 jest.mock("../src/foundation/fund-writes", () => ({ createFundWrites: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
@@ -51,9 +53,9 @@ test("starts a new movement from the authenticated summary", async () => {
   expect(register).toHaveBeenCalledTimes(1);
 });
 
-test("opens funds without changing the other workspace actions", async () => {
-  const accounts = jest.fn(), transactions = jest.fn(), transfers = jest.fn(), budgets = jest.fn(), funds = jest.fn();
-  await render(<HomeScreen openAccounts={accounts} openTransactions={transactions} openTransfers={transfers} openBudgets={budgets} openFunds={funds} />);
+test("opens debts without changing the other workspace actions", async () => {
+  const accounts = jest.fn(), transactions = jest.fn(), transfers = jest.fn(), budgets = jest.fn(), funds = jest.fn(), debts = jest.fn();
+  await render(<HomeScreen openAccounts={accounts} openTransactions={transactions} openTransfers={transfers} openBudgets={budgets} openFunds={funds} openDebts={debts} />);
   await fireEvent.press(screen.getByRole("button", { name: "Cuentas" }));
   expect(accounts).toHaveBeenCalledTimes(1); expect(transactions).not.toHaveBeenCalled();
   await fireEvent.press(screen.getByRole("button", { name: "Movimientos" }));
@@ -63,7 +65,9 @@ test("opens funds without changing the other workspace actions", async () => {
   await fireEvent.press(screen.getByRole("button", { name: "Presupuestos" }));
   expect(funds).not.toHaveBeenCalled();
   await fireEvent.press(screen.getByRole("button", { name: "Fondos" }));
-  expect(funds).toHaveBeenCalledTimes(1); expect(budgets).toHaveBeenCalledTimes(1); expect(accounts).toHaveBeenCalledTimes(1);
+  expect(debts).not.toHaveBeenCalled();
+  await fireEvent.press(screen.getByRole("button", { name: "Deudas" }));
+  expect(debts).toHaveBeenCalledTimes(1); expect(funds).toHaveBeenCalledTimes(1); expect(budgets).toHaveBeenCalledTimes(1); expect(accounts).toHaveBeenCalledTimes(1);
   expect(transactions).toHaveBeenCalledTimes(1); expect(transfers).toHaveBeenCalledTimes(1);
 });
 

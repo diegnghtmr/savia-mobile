@@ -5,6 +5,8 @@ import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
 import { createBudgetWrites } from "../foundation/budget-writes";
 import { createBudgets } from "../foundation/budgets";
+import { createDebtPayments } from "../foundation/debt-payments";
+import { createDebts } from "../foundation/debts";
 import { createFundWrites } from "../foundation/fund-writes";
 import { createFunds } from "../foundation/funds";
 import { createIdentity } from "../foundation/identity";
@@ -15,6 +17,7 @@ import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { BudgetsScreen } from "../mobile-shell/budgets-screen";
+import { DebtsScreen } from "../mobile-shell/debts-screen";
 import { FundsScreen } from "../mobile-shell/funds-screen";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
 import { OutboxPanel } from "../mobile-shell/outbox-panel";
@@ -31,14 +34,15 @@ export default function Index() {
 }
 
 function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
-  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds">("home");
+  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts">("home");
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [apis] = useState(() => {
     const scoped = offline.scope(profile, id, (...args) => transport().requestInWorkspace(...args), (at) => setSavedAt((old) => Math.min(old ?? at, at)), () => setSavedAt(null));
     const box = offline.outbox(profile, id, scoped), transactions = createTransactions(box.request, id);
     return { box, accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(box.request, id, transactions.transferAccounts),
       budgets: createBudgets(scoped, id, () => transactions.options("categories")), budgetWrites: createBudgetWrites(scoped, id),
-      funds: createFunds(scoped, id), fundWrites: createFundWrites(scoped, id, transactions.transferAccounts) };
+      funds: createFunds(scoped, id), fundWrites: createFundWrites(scoped, id, transactions.transferAccounts),
+      debts: createDebts(scoped, id), debtPayments: createDebtPayments(scoped, id, transactions.transferAccounts) };
   });
   const back = () => show("home");
   return <><OfflineBanner savedAt={savedAt} /><OutboxPanel box={apis.box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} back={back} />
@@ -46,11 +50,12 @@ function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
     : route === "transfers" ? <TransfersScreen api={apis.transfers} back={back} />
     : route === "budgets" ? <BudgetsScreen api={apis.budgets} writes={apis.budgetWrites} back={back} />
     : route === "funds" ? <FundsScreen api={apis.funds} writes={apis.fundWrites} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} />}</>;
+    : route === "debts" ? <DebtsScreen api={apis.debts} payments={apis.debtPayments} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -71,6 +76,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openTransfers && <AuthAction label="Transferencias" action={openTransfers} />}
         {openBudgets && <AuthAction label="Presupuestos" action={openBudgets} />}
         {openFunds && <AuthAction label="Fondos" action={openFunds} />}
+        {openDebts && <AuthAction label="Deudas" action={openDebts} />}
       </ScrollView>
     </SafeAreaView>
   );

@@ -17,7 +17,8 @@ const profile = "00000000-0000-4000-8000-000000000010", otherProfile = "00000000
 const first = { id: "00000000-0000-4000-8000-000000000020", name: "Casa" };
 const second = { id: "00000000-0000-4000-8000-000000000021", name: "Trabajo" };
 const accounts = "/v1/accounts?limit=20", movements = "/v1/transactions?limit=20", tags = "/v1/tags?limit=200";
-const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`, "/v1/funds?limit=20", "/v1/funds?limit=20&cursor=fixture"];
+const debts = "/v1/debts?limit=20", projection = `/v1/debts/${first.id}/projection`;
+const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`, "/v1/funds?limit=20", "/v1/funds?limit=20&cursor=fixture", debts, projection];
 
 function setup() {
   let online = true, denied = false, workspaces = [first, second], owner = profile;
@@ -42,7 +43,7 @@ beforeEach(() => {
   jest.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => { saved.delete(key); });
 });
 
-test("cold offline restart reads only saved accounts, movements, budgets, funds and catalogs and presents their saved date", async () => {
+test("cold offline restart reads only saved accounts, movements, budgets, funds, debts, projections and catalogs and presents their saved date", async () => {
   const fx = setup(), local = fx.reopen();
   await local.identity.select(first.id);
   const show = jest.fn();
@@ -74,12 +75,13 @@ test("cache never crosses workspace or signed-in profile and never replaces a pe
   const fx = setup(), local = fx.reopen(), stale = jest.fn();
   await local.identity.select(first.id);
   const read = local.scope(profile, first.id, fx.api.requestInWorkspace, stale);
-  await read(first.id, accounts);
+  for (const path of [accounts, debts, projection]) await read(first.id, path);
   fx.denyReads();
-  await expect(read(first.id, accounts)).rejects.toMatchObject({ status: 403 });
+  for (const path of [accounts, debts, projection]) await expect(read(first.id, path)).rejects.toMatchObject({ status: 403 });
   await local.identity.select(second.id);
   fx.setOnline(false);
-  await expect(local.scope(profile, second.id, fx.api.requestInWorkspace, stale)(second.id, accounts)).rejects.toThrow();
+  const other = local.scope(profile, second.id, fx.api.requestInWorkspace, stale);
+  for (const path of [accounts, debts, projection]) await expect(other(second.id, path)).rejects.toThrow();
   fx.setOwner(otherProfile);
   await expect(fx.reopen().identity.bootstrap()).rejects.toThrow();
   await expect(read(first.id, accounts)).rejects.toThrow();

@@ -4,9 +4,9 @@ import { workspaceUnavailable } from "./identity-draft";
 import { OfflineStorageUnavailable, offlineStore, purgeOfflineScope } from "./offline-db";
 import { createOutbox } from "./outbox";
 import { isOfflineFailure } from "./transport";
-import type { WorkspaceContext } from "./workspace-context";
+import { WorkspaceSelectionUnavailable, type WorkspaceContext } from "./workspace-context";
 
-const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|funds|categories|payees|tags)(?:\?|$)/i;
+const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|funds|debts(?:\/[a-f\d-]{36}\/projection)?|categories|payees|tags)(?:\?|$)/i;
 const optional = <T>(operation: Promise<T>) => operation.catch(() => null);
 
 export function createOffline(identity: Identity, principal: () => Promise<string | null>) {
@@ -16,7 +16,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
     return row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
   });
-  const remember = (owner: string, context: WorkspaceContext | null, ticket: number, expected?: string) => store(async (db) => {
+  const remember = (owner: string, context: WorkspaceContext | null, ticket: number, expected?: string, keepActive = false) => store(async (db) => {
     if (ticket !== epoch) return;
     const publish = async (value: WorkspaceContext | null) => {
       if (value) await db.runAsync("INSERT OR REPLACE INTO membership VALUES (?, ?, ?)", owner, value.profileId, JSON.stringify(value));
@@ -38,7 +38,8 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       catch (cause) { failed.push({ ...scope, cause }); }
     }
     const items = context?.items.filter(({ id }) => !failed.some((scope) => scope.profile === context.profileId && scope.workspace === id));
-    const active = items?.find(({ id }) => id === context?.active?.id) ?? null;
+    const selected = keepActive && before?.profileId === context?.profileId ? before?.active : context?.active;
+    const active = items?.find(({ id }) => id === selected?.id) ?? null;
     await publish(context && { ...context, items: items!, active });
     const affected = expected ?? context?.active?.id;
     const failure = failed.find(({ workspace }) => workspace === affected);
@@ -56,6 +57,9 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       if (owner && await current()) await remember(owner, context, ticket);
       return context;
     } catch (error) {
+      if (error instanceof WorkspaceSelectionUnavailable && owner && await current()) {
+        await remember(owner, error.context, ticket, error.selection, true);
+      }
       if (owner && fallback && isOfflineFailure(error) && await current()) {
         const saved = await optional(snapshot(owner));
         if (saved?.active && await current()) return saved as T;
@@ -92,6 +96,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
           const payload = await request(workspace, path, { ...options, expectedProfile: profile, onMembership: async (context) => {
             if (owner && await current()) await remember(owner, context, ticket, workspace);
             if (ticket !== epoch) throw new Error(workspaceUnavailable);
+            await options?.onMembership?.(context);
           } });
           if (owner && read && await current()) await optional(store(async (db) => {
             if (ticket !== epoch) return;
