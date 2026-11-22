@@ -5,11 +5,13 @@ import { createAccounts } from "../foundation/accounts";
 import { getAuth } from "../foundation/auth";
 import { createIdentity } from "../foundation/identity";
 import { createTransactions } from "../foundation/transactions";
+import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { paletteFor } from "../mobile-shell/tokens";
 import { TransactionsScreen } from "../mobile-shell/transactions-screen";
+import { TransfersScreen } from "../mobile-shell/transfers-screen";
 
 const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
 const identity = createIdentity((operation) => transport().withSession(operation));
@@ -19,19 +21,21 @@ export default function Index() {
 }
 
 function WorkspaceHome({ id }: { id: string }) {
-  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction">("home");
+  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers">("home");
   const [apis] = useState(() => {
     const scoped: ReturnType<typeof createTransport>["requestInWorkspace"] = (...args) => transport().requestInWorkspace(...args);
-    return { accounts: createAccounts(scoped, id), transactions: createTransactions(scoped, id) };
+    const transactions = createTransactions(scoped, id);
+    return { accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(scoped, id, transactions.transferAccounts) };
   });
   const back = () => show("home");
   if (route === "accounts") return <AccountsScreen api={apis.accounts} back={back} />;
   if (route === "transactions" || route === "new-transaction") return <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />;
-  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} />;
+  if (route === "transfers") return <TransfersScreen api={apis.transfers} back={back} />;
+  return <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} />;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -49,6 +53,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement }:
           </Pressable>}
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
         {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
+        {openTransfers && <AuthAction label="Transferencias" action={openTransfers} />}
       </ScrollView>
     </SafeAreaView>
   );

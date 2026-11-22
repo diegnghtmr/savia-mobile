@@ -142,6 +142,11 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
   }
   return {
     options: (kind: "accounts" | "categories") => catalog(kind),
+    async transferAccounts() {
+      const currencies = new Map<string, string>();
+      const names = await catalog("accounts", currencies);
+      return [...currencies].map(([id, currency]) => ({ id, currency, name: names.get(id)! }));
+    },
     async formOptions(creating: boolean) {
       const currencies = new Map<string, string>();
       const [accounts, categories, payees, tags] = await Promise.all([creating ? catalog("accounts", currencies) : new Map<string, string>(), catalog("categories"), catalog("payees"), catalog("tags")]);

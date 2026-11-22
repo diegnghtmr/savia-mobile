@@ -7,6 +7,7 @@ jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn() }));
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
 jest.mock("../src/foundation/transactions", () => ({ createTransactions: jest.fn() }));
+jest.mock("../src/foundation/transfers", () => ({ createTransfers: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));
 
 jest.mock("react-native/Libraries/Utilities/useColorScheme", () => ({ default: jest.fn(() => "light") }));
@@ -45,13 +46,15 @@ test("starts a new movement from the authenticated summary", async () => {
   expect(register).toHaveBeenCalledTimes(1);
 });
 
-test("opens movements without changing the existing accounts action", async () => {
-  const accounts = jest.fn(), transactions = jest.fn();
-  await render(<HomeScreen openAccounts={accounts} openTransactions={transactions} />);
+test("opens transfers without changing the existing accounts and movements actions", async () => {
+  const accounts = jest.fn(), transactions = jest.fn(), transfers = jest.fn();
+  await render(<HomeScreen openAccounts={accounts} openTransactions={transactions} openTransfers={transfers} />);
   await fireEvent.press(screen.getByRole("button", { name: "Cuentas" }));
   expect(accounts).toHaveBeenCalledTimes(1); expect(transactions).not.toHaveBeenCalled();
   await fireEvent.press(screen.getByRole("button", { name: "Movimientos" }));
-  expect(accounts).toHaveBeenCalledTimes(1); expect(transactions).toHaveBeenCalledTimes(1);
+  expect(accounts).toHaveBeenCalledTimes(1); expect(transactions).toHaveBeenCalledTimes(1); expect(transfers).not.toHaveBeenCalled();
+  await fireEvent.press(screen.getByRole("button", { name: "Transferencias" }));
+  expect(accounts).toHaveBeenCalledTimes(1); expect(transactions).toHaveBeenCalledTimes(1); expect(transfers).toHaveBeenCalledTimes(1);
 });
 
 test("exposes semantic heading, order, and 44px target", async () => {
