@@ -130,3 +130,33 @@ test("shows invalid limit without a request, and lets a corrected filter paginat
   expect(await screen.findByRole("header", { name: "Reembolso aceptado" })).toBeTruthy();
   for (const text of ["−9007199254740993,012 KWD", "Cuenta: Caja", "Categoría: Compras", "Contraparte: Tienda", "Etiquetas: Viaje", "Compras · −0,005 KWD"]) expect(screen.getByText(text)).toBeTruthy();
 });
+
+// Reviewer regression for mobile M3 (verify mwr3ili1, PASS). Append to __tests__/transactions.test.tsx
+// using its existing fixtures (setup, row, page, category, movement).
+test.each([
+  ["JPY", "9007199254740993001", "9007199254740993001 JPY", "1 JPY"],
+  ["COP", "9007199254740993001", "90071992547409930,01 COP", "0,01 COP"],
+  ["KWD", "-9007199254740993001", "−9007199254740993,001 KWD", "0,001 KWD"],
+])("preserves exact %s amounts on the list, detail and splits", async (currency, amountMinor, display, split) => {
+  const { api, send } = setup();
+  const originalSend = send.getMockImplementation()!;
+  const entry = {
+    ...row,
+    amount: { amountMinor, currency },
+    splits: [{ amount: { amountMinor: "1", currency }, categoryId: category }],
+  };
+  send.mockImplementation(async (url, init) => {
+    const result = await originalSend(url, init);
+    const path = new URL(url).pathname;
+    if (path === "/v1/transactions") return { ...result, json: async () => page([entry]) };
+    if (path === "/v1/transactions/" + movement) return { ...result, json: async () => entry };
+    return result;
+  });
+
+  await expect(api.list()).resolves.toMatchObject({ items: [{ amount: display }] });
+  await expect(api.detail(movement.toUpperCase())).resolves.toMatchObject({
+    id: movement,
+    amount: display,
+    splits: [{ amount: split }],
+  });
+});
