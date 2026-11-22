@@ -138,3 +138,35 @@ test("a fresh online read clears the offline banner after reconnection", async (
     expect(screen.queryByRole("alert", { name: /Sin conexión — datos guardados el/ })).toBeNull();
   } finally { await f.close(); }
 });
+
+test("analytics keeps the offline banner when only one report falls back and clears it on an entirely fresh reload", async () => {
+  const f = await setup();
+  try {
+    const network = jest.mocked(expoFetch), normal = network.getMockImplementation()!;
+    let cashOffline = false;
+    network.mockImplementation(async (url, init) => {
+      const { pathname, searchParams } = new URL(String(url));
+      if (!pathname.startsWith("/v1/analytics/")) return normal(url, init);
+      expect(new Headers(init?.headers).get("X-Workspace-Id")).toBe(workspace);
+      const amount = { currency: "COP", amountMinor: "12" };
+      const from = searchParams.get("from")!, to = searchParams.get("to")!;
+      let body: unknown = { periodStart: from, periodEnd: to, baseCurrency: "COP", netWorth: amount, income: amount, expenses: amount, savingsCapacity: amount };
+      if (pathname.endsWith("/cash-flow")) {
+        if (cashOffline) throw new Error("Disconnected while loading categories");
+        body = { series: [], categories: [{ categoryId: account, categoryName: "Hogar", amount, percentage: 100 }] };
+      } else if (pathname.endsWith("/advanced")) {
+        body = { metric: "monthly_savings_capacity", generatedAt: "2026-11-21T00:00:00Z", data: { series: [
+          { month: from, incomeMinor: "12", expensesMinor: "0", savingsCapacityMinor: "12" },
+        ] } };
+      }
+      return { status: 200, ok: true, headers: new Headers(), redirected: false, json: async () => body } as never;
+    });
+    const banner = { name: /Sin conexión — datos guardados el/ };
+    await press("Analítica"); await screen.findByText("Hogar: 0,12 COP · 100 %");
+    expect(screen.queryByRole("alert", banner)).toBeNull();
+    cashOffline = true; await press("Aplicar período");
+    await screen.findByRole("alert", banner); await screen.findByText("Hogar: 0,12 COP · 100 %");
+    cashOffline = false; await press("Aplicar período");
+    await screen.findByText("Hogar: 0,12 COP · 100 %"); expect(screen.queryByRole("alert", banner)).toBeNull();
+  } finally { await f.close(); }
+});

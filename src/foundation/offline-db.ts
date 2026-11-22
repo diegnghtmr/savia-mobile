@@ -27,6 +27,10 @@ const migrations = [
   `ALTER TABLE outbox ADD COLUMN legacy_slot TEXT;
    UPDATE outbox SET legacy_slot = slot;
    CREATE UNIQUE INDEX outbox_legacy ON outbox (principal, profile, workspace, legacy_slot);`,
+  `CREATE TABLE offline_sequence (value INTEGER NOT NULL);
+   INSERT INTO offline_sequence VALUES (0);
+   CREATE TABLE revocations (principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL, sequence INTEGER NOT NULL,
+     PRIMARY KEY (principal, profile, workspace));`,
 ];
 
 export class OfflineStorageUnavailable extends Error {}
@@ -38,6 +42,17 @@ export async function atomic<T>(db: SQLiteDatabase, operation: () => Promise<T>)
     await db.execAsync("COMMIT");
     return result;
   } catch (error) { await db.execAsync("ROLLBACK"); throw error; }
+}
+
+export async function nextOfflineSequence(db: SQLiteDatabase) {
+  const row = await db.getFirstAsync<{ value: number }>("UPDATE offline_sequence SET value = value + 1 RETURNING value");
+  if (!row || !Number.isSafeInteger(row.value)) throw new Error("Invalid offline sequence");
+  return row.value;
+}
+
+export function revokedAfter(db: SQLiteDatabase, principal: string, profile: string, workspace: string, sequence: number) {
+  return db.getFirstAsync(`SELECT 1 FROM revocations WHERE principal = ? AND profile = ? AND workspace = ? AND sequence > ?`,
+    principal, profile, workspace, sequence);
 }
 
 export function offlineMembership(db: SQLiteDatabase, principal: string, profile: string, workspace: string) {

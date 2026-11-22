@@ -125,3 +125,28 @@ test("does not clear an invalid receipt or enqueue a new offline payment", async
   f.disconnect(); await expect(writer.pay(debt, "KWD", draft)).rejects.toThrow(/Necesitas conexión/);
   expect(f.pending()).toEqual([]); expect(f.posts).toHaveLength(2); expect(f.commits.size).toBe(1);
 });
+
+// Reviewer regression (verify mwraeren). Append to __tests__/debt-payments.test.tsx.
+test.each([
+  ["default principal becomes an explicit principal", {}, { principalAmount: "90,123" }],
+  ["an omitted fee becomes an explicit zero",
+    { principalAmount: "60", interestAmount: "30,123" },
+    { principalAmount: "60", interestAmount: "30,123", feeAmount: "0,000" }],
+])("an uncertain payment retry is idempotent when %s", async (_label, initial, retry) => {
+  const f = setup(), first = f.connect();
+  await first.loadAccounts();
+  const payment = { ...draft, totalAmount: "90,123" };
+
+  f.lose();
+  await expect(first.pay(debt, "KWD", { ...payment, ...initial })).rejects.toThrow(/Necesitas conexión/);
+  expect(f.commits.size).toBe(1);
+
+  const reopened = f.connect();
+  await reopened.loadAccounts();
+  await expect(reopened.pay(debt, "KWD", { ...payment, ...retry })).resolves.toBe(receipt);
+  expect({
+    effects: f.commits.size,
+    pending: f.pending().length,
+    sentKeys: new Set(f.posts.map(({ key }) => key)).size,
+  }).toEqual({ effects: 1, pending: 0, sentKeys: 1 });
+});

@@ -1,7 +1,8 @@
 import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, useWindowDimensions, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useState } from "react";
-import { createAccounts } from "../foundation/accounts";
+import { createAccounts, type ScopedRequest } from "../foundation/accounts";
+import { createAnalytics } from "../foundation/analytics";
 import { getAuth } from "../foundation/auth";
 import { createBudgetWrites } from "../foundation/budget-writes";
 import { createBudgets } from "../foundation/budgets";
@@ -15,8 +16,10 @@ import { createTransactions } from "../foundation/transactions";
 import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
+import { AnalyticsScreen } from "../mobile-shell/analytics-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { BudgetsScreen } from "../mobile-shell/budgets-screen";
+import { DashboardScreen } from "../mobile-shell/dashboard-screen";
 import { DebtsScreen } from "../mobile-shell/debts-screen";
 import { FundsScreen } from "../mobile-shell/funds-screen";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
@@ -34,15 +37,23 @@ export default function Index() {
 }
 
 function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
-  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts">("home");
+  const [route, show] = useState<"home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics">("home");
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [apis] = useState(() => {
-    const scoped = offline.scope(profile, id, (...args) => transport().requestInWorkspace(...args), (at) => setSavedAt((old) => Math.min(old ?? at, at)), () => setSavedAt(null));
+    const request: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
+    const scoped = offline.scope(profile, id, request, (at) => setSavedAt((old) => Math.min(old ?? at, at)), () => setSavedAt(null));
+    async function reportBatch<T>(read: (scope: ScopedRequest) => Promise<T>) {
+      let oldest: number | null = null;
+      const scope = offline.scope(profile, id, request, (at) => { oldest = Math.min(oldest ?? at, at); });
+      const result = await read(scope);
+      setSavedAt(oldest);
+      return result;
+    }
     const box = offline.outbox(profile, id, scoped), transactions = createTransactions(box.request, id);
     return { box, accounts: createAccounts(scoped, id), transactions, transfers: createTransfers(box.request, id, transactions.transferAccounts),
       budgets: createBudgets(scoped, id, () => transactions.options("categories")), budgetWrites: createBudgetWrites(scoped, id),
       funds: createFunds(scoped, id), fundWrites: createFundWrites(scoped, id, transactions.transferAccounts),
-      debts: createDebts(scoped, id), debtPayments: createDebtPayments(scoped, id, transactions.transferAccounts) };
+      debts: createDebts(scoped, id), debtPayments: createDebtPayments(scoped, id, transactions.transferAccounts), analytics: createAnalytics(scoped, id, reportBatch) };
   });
   const back = () => show("home");
   return <><OfflineBanner savedAt={savedAt} /><OutboxPanel box={apis.box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} back={back} />
@@ -51,11 +62,13 @@ function WorkspaceHome({ id, profile }: { id: string; profile: string }) {
     : route === "budgets" ? <BudgetsScreen api={apis.budgets} writes={apis.budgetWrites} back={back} />
     : route === "funds" ? <FundsScreen api={apis.funds} writes={apis.fundWrites} back={back} />
     : route === "debts" ? <DebtsScreen api={apis.debts} payments={apis.debtPayments} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} />}</>;
+    : route === "dashboard" ? <DashboardScreen api={apis.analytics} back={back} />
+    : route === "analytics" ? <AnalyticsScreen api={apis.analytics} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -65,8 +78,11 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
           <Text style={[styles.eyebrow, { color: colors.action }]}>Savia</Text>
           <Text style={[styles.title, { color: colors.text }]}>Tu dinero, con calma</Text>
         </View>
-        <Text style={[styles.body, { color: colors.muted }]}>Todavía no hay información financiera disponible.</Text>
-        <Text style={[styles.body, { color: colors.text }]}>Cuando exista una fuente autorizada, vas a verla acá.</Text>
+        {openDashboard ? <AuthAction label="Resumen financiero" action={openDashboard} /> : <>
+          <Text style={[styles.body, { color: colors.muted }]}>Todavía no hay información financiera disponible.</Text>
+          <Text style={[styles.body, { color: colors.text }]}>Cuando exista una fuente autorizada, vas a verla acá.</Text>
+        </>}
+        {openAnalytics && <AuthAction label="Analítica" action={openAnalytics} />}
         {registerMovement ? <AuthAction label="Registrar movimiento" action={registerMovement} /> :
           <Pressable accessibilityRole="button" accessibilityLabel="Registrar movimiento no disponible" accessibilityState={{ disabled: true }} disabled style={[styles.action, { backgroundColor: colors.raised }]}>
             <Text style={{ color: colors.disabled }}>Registrar movimiento</Text>

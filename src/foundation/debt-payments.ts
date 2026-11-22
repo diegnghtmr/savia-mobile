@@ -25,7 +25,10 @@ function paymentBody(input: unknown, currency: unknown, accounts: ReadonlyMap<st
     if (totalAmount.amountMinor === "0") throw new TypeError();
     const split = parts.flatMap((part) => Object.hasOwn(row, part) ? [[part, nonnegative(row[part], currency)] as const] : []);
     if (split.length && split.reduce((sum, [, value]) => sum + BigInt(value.amountMinor), 0n) !== BigInt(totalAmount.amountMinor)) throw new TypeError();
-    return { accountId, totalAmount, ...Object.fromEntries(split), occurredAt: `${date}T00:00:00.000Z` };
+    // Resolve the same split as the server, then send one stable representation for its fingerprint.
+    const nonzero = split.filter(([, value]) => value.amountMinor !== "0");
+    const principalOnly = nonzero.length === 1 && nonzero[0][0] === "principalAmount";
+    return { accountId, totalAmount, ...Object.fromEntries(principalOnly ? [] : nonzero), occurredAt: `${date}T00:00:00.000Z` };
   } catch { throw invalid(); }
 }
 
