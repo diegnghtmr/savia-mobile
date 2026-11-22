@@ -150,3 +150,40 @@ test.each([
     sentKeys: new Set(f.posts.map(({ key }) => key)).size,
   }).toEqual({ effects: 1, pending: 0, sentKeys: 1 });
 });
+
+// Reviewer regression (verify mwrbkwrv). Append to __tests__/debt-payments.test.tsx.
+import { pendingSlot } from "../src/foundation/pending-submission";
+
+test("an in-flight payment journal from before the split normalization upgrade is replayed, not duplicated", async () => {
+  const f = setup(), writer = f.connect(); await writer.loadAccounts();
+  const oldKey = id(9), occurredAt = `${draft.date}T00:00:00.000Z`;
+  const legacyAmount = (amountMinor: string) => ({ amountMinor, currency: "KWD" });
+  const oldBody = { accountId: account, totalAmount: legacyAmount("90123"), principalAmount: legacyAmount("60000"),
+    interestAmount: legacyAmount("30123"), feeAmount: legacyAmount("0"), occurredAt };
+  const slot = await pendingSlot(workspace, profile, JSON.stringify(["POST", path, oldBody]));
+  await secure.setItemAsync(slot, JSON.stringify({ key: oldKey, createdAt: start, clock: "server" }));
+  f.commits.set(oldKey, { at: start, body: { id: receipt, accountId: account, type: "debt_payment", status: "confirmed", occurredAt, amount: amount("-90123") } });
+
+  await expect(writer.pay(debt, "KWD", { ...draft, totalAmount: "90,123", principalAmount: "60", interestAmount: "30,123", feeAmount: "0" })).resolves.toBe(receipt);
+  expect({ keys: f.posts.map(({ key }) => key), effects: f.commits.size, pending: f.pending().length }).toEqual({
+    keys: [oldKey], effects: 1, pending: 0,
+  });
+  expect(f.posts.map(({ body }) => body)).toEqual([oldBody]);
+});
+
+test("finds a legacy full-principal split even when the reopened form leaves it blank", async () => {
+  const f = setup(), writer = f.connect(); await writer.loadAccounts();
+  const key = id(9), occurredAt = `${draft.date}T00:00:00.000Z`;
+  const body = { accountId: account, totalAmount: { amountMinor: "90123", currency: "KWD" },
+    principalAmount: { amountMinor: "90123", currency: "KWD" }, interestAmount: { amountMinor: "0", currency: "KWD" }, occurredAt };
+  const slot = await pendingSlot(workspace, profile, JSON.stringify(["POST", path, body]));
+  await secure.setItemAsync(slot, JSON.stringify({ key, createdAt: start, clock: "server" }));
+  f.lose();
+  await expect(writer.pay(debt, "KWD", { ...draft, totalAmount: "90,123" })).rejects.toThrow(/Necesitas conexión/);
+  expect(f.posts).toEqual([{ key, body, persisted: true, match: null }]);
+  expect(f.pending()).toEqual([[slot, expect.any(String)]]);
+  expect(JSON.parse(f.pending()[0][1])).toMatchObject({ key, body: JSON.stringify(body), createdAt: start, clock: "server" });
+  f.advance(23 * hour);
+  await expect(writer.pay(debt, "KWD", { ...draft, totalAmount: "90,123" })).rejects.toThrow(/Puede que este movimiento/);
+  expect(f.posts).toHaveLength(1); expect(f.commits.size).toBe(1); expect(f.pending()).toHaveLength(1);
+});

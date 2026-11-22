@@ -1,12 +1,12 @@
 import type { ScopedRequest } from "./accounts";
 import type { Identity } from "./identity";
 import { workspaceUnavailable } from "./identity-draft";
-import { atomic, nextOfflineSequence, OfflineStorageUnavailable, offlineStore, purgeOfflineScope, revokedAfter } from "./offline-db";
+import { atomic, membershipChangedAfter, nextOfflineSequence, OfflineStorageUnavailable, offlineStore, purgeOfflineScope } from "./offline-db";
 import { createOutbox } from "./outbox";
 import { isOfflineFailure } from "./transport";
 import { WorkspaceSelectionUnavailable, type WorkspaceContext } from "./workspace-context";
 
-const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|funds|debts(?:\/[a-f\d-]{36}\/projection)?|analytics\/(?:summary|cash-flow|advanced)|subscriptions|categories|payees|tags)(?:\?|$)/i;
+const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|funds|debts(?:\/[a-f\d-]{36}\/projection)?|analytics\/(?:summary|cash-flow|advanced)|forecasts\/[a-f\d-]{36}|scenarios|subscriptions|categories|payees|tags)(?:\?|$)/i;
 const optional = <T>(operation: Promise<T>) => operation.catch(() => null);
 
 export function createOffline(identity: Identity, principal: () => Promise<string | null>) {
@@ -29,7 +29,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
     const before = row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
     const fenced = started === undefined ? [] : await db.getAllAsync<{ profile: string; workspace: string }>(
-      "SELECT profile, workspace FROM revocations WHERE principal = ? AND sequence > ?", owner, started);
+      "SELECT profile, workspace FROM membership_events WHERE principal = ? AND sequence > ?", owner, started);
     const protectedScopes = fenced.filter((scope) => scope.profile === fresh?.profileId || scope.profile === before?.profileId);
     if (protectedScopes.some(({ workspace }) => expected === undefined || workspace === expected)) throw new Error(workspaceUnavailable);
     // An old response for an unaffected workspace cannot change the membership of a fenced workspace.
@@ -42,10 +42,14 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       .map(({ id }) => ({ profile: before.profileId, workspace: id })) ?? [];
     if (expected && context && !context.items.some(({ id }) => id === expected) &&
       !lost.some(({ profile, workspace }) => profile === context.profileId && workspace === expected)) lost.push({ profile: context.profileId, workspace: expected });
-    // Fence all already-started requests and publish revocation atomically, before fallible deletion.
-    if (lost.length) await atomic(db, async () => {
+    const recordEvents = async (scopes: typeof lost) => {
       const sequence = await nextOfflineSequence(db);
-      for (const { profile, workspace } of lost) await db.runAsync("INSERT OR REPLACE INTO revocations VALUES (?, ?, ?, ?)", owner, profile, workspace, sequence);
+      for (const { profile, workspace } of scopes) await db.runAsync("INSERT OR REPLACE INTO membership_events VALUES (?, ?, ?, ?)", owner, profile, workspace, sequence);
+      return sequence;
+    };
+    // Fence already-started requests and publish revocation before fallible deletion.
+    if (lost.length) await atomic(db, async () => {
+      await recordEvents(lost);
       if (before) await publish({ ...before, items: stillAllowed, active: stillAllowed.find(({ id }) => id === before.active?.id) ?? null });
     });
     const stale = await db.getAllAsync<{ profile: string; workspace: string }>(
@@ -59,11 +63,22 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     const items = context?.items.filter(({ id }) => !failed.some((scope) => scope.profile === context.profileId && scope.workspace === id));
     const selected = keepActive && before?.profileId === context?.profileId ? before?.active : context?.active;
     const active = items?.find(({ id }) => id === selected?.id) ?? null;
-    await publish(context && { ...context, items: items!, active });
+    const next = context && { ...context, items: items!, active };
+    const knownEvents = next && await db.getAllAsync<{ workspace: string }>("SELECT workspace FROM membership_events WHERE principal = ? AND profile = ?", owner, next.profileId);
+    const regranted = next && knownEvents && knownEvents.filter(({ workspace }) => next.items.some(({ id }) => id === workspace) &&
+      !stillAllowed.some(({ id }) => id === workspace)).map((event) => ({ ...event, profile: next.profileId }));
+    let observed = started;
+    if (regranted?.length) await atomic(db, async () => {
+      const sequence = await recordEvents(regranted);
+      await publish(next);
+      if (regranted.some(({ workspace }) => workspace === expected)) observed = sequence;
+    });
+    else await publish(next);
     const affected = expected ?? context?.active?.id;
     const failure = failed.find(({ workspace }) => workspace === affected);
     if (failure) throw new Error(workspaceUnavailable, { cause: failure.cause });
     if (!context && failed.length) throw new AggregateError(failed.map(({ cause }) => cause), "No pudimos borrar los datos sin conexión.");
+    return observed;
   }).catch((error: unknown) => {
     if (error instanceof OfflineStorageUnavailable) return;
     throw error;
@@ -108,18 +123,20 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       return async (expected, path, options) => {
         if (ticket !== epoch || expected !== workspace) throw new Error(workspaceUnavailable);
         const owner = await optional(principal()), started = owner ? await stamp() : null;
+        let observed = started;
         const key = `${options?.includeETag ? "etag:" : ""}${path}`;
         const read = (options?.method ?? "GET") === "GET" && cacheable.test(path);
         const current = async () => owner !== null && ticket === epoch && await optional(principal()) === owner;
         try {
           const payload = await request(workspace, path, { ...options, expectedProfile: profile, onMembership: async (context) => {
             if (ticket !== epoch || (owner && !await current())) throw new Error(workspaceUnavailable);
-            if (owner && started !== null) await remember(owner, context, ticket, started, workspace);
+            if (owner && started !== null) observed = await remember(owner, context, ticket, started, workspace) ?? started;
             await options?.onMembership?.(context);
           } });
           if (ticket !== epoch || (owner && !await current())) throw new Error(workspaceUnavailable);
-          if (owner && started !== null) await store(async (db) => {
-            if (ticket !== epoch || await revokedAfter(db, owner, profile, workspace, started)) throw new Error(workspaceUnavailable);
+          const receivedAfter = observed;
+          if (owner && receivedAfter !== null) await store(async (db) => {
+            if (ticket !== epoch || await membershipChangedAfter(db, owner, profile, workspace, receivedAfter)) throw new Error(workspaceUnavailable);
             if (!read) return;
             await optional(db.runAsync(`INSERT OR REPLACE INTO cache SELECT ?, ?, ?, ?, ?, ? FROM membership
               WHERE principal = ? AND profile = ? AND json_extract(snapshot, '$.active.id') = ?`, owner, profile, workspace, key,
@@ -132,7 +149,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
         } catch (error) {
           if (owner && started !== null && read && isOfflineFailure(error) && await current()) {
             const row = await optional(store(async (db) => {
-              if (await revokedAfter(db, owner, profile, workspace, started)) return null;
+              if (await membershipChangedAfter(db, owner, profile, workspace, started)) return null;
               return db.getFirstAsync<{ payload: string; saved_at: number }>(
                 `SELECT cache.payload, cache.saved_at FROM cache JOIN membership USING (principal, profile)
                  WHERE principal = ? AND profile = ? AND workspace = ? AND path = ? AND json_extract(snapshot, '$.active.id') = ?`,

@@ -6,14 +6,14 @@ import { readProfileId, readWorkspaceContext, uuid, type WorkspaceContext } from
 
 const timeoutDefault = 10_000;
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
-type RequestInput = { method?: string; body?: unknown; idempotencyKey?: string; successStatus?: number | readonly number[] };
+type RequestInput = { method?: string; body?: unknown; multipart?: FormData; idempotencyKey?: string; successStatus?: number | readonly number[] };
 type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
   expectedProfile?: string;
   form?: object;
   onMembership?: (context: WorkspaceContext) => Promise<void>;
-  submit?: (profileId: string, operation: (key: string) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
+  submit?: (profileId: string, operation: (key: string, dispatch?: { body: unknown }) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
 };
 export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unknown>;
 export type WithSession = <T>(operation: (request: SaviaRequest) => Promise<T>) => Promise<T>;
@@ -62,12 +62,13 @@ export function createTransport({
     if (!session) throw new TransportError("http", 401);
     return operation(session.accessToken);
   }
-  async function execute(token: string, path: string, { method = "GET", body, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }, onDate?: (date: number | null) => void) {
+  async function execute(token: string, path: string, { method = "GET", body, multipart, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }, onDate?: (date: number | null) => void) {
     safePath(path);
     const headers: Record<string, string> = { Accept: "application/json, application/problem+json" };
     headers.Authorization = ["Bearer", token].join(" ");
-    const payload = body === undefined ? undefined : JSON.stringify(body);
-    if (payload !== undefined) headers["Content-Type"] = "application/json";
+    if (multipart !== undefined && (method !== "POST" || body !== undefined || !(multipart instanceof FormData))) throw new TypeError("Invalid multipart request");
+    const payload = multipart ?? (body === undefined ? undefined : JSON.stringify(body));
+    if (!multipart && payload !== undefined) headers["Content-Type"] = "application/json";
     if (idempotencyKey !== undefined) headers["Idempotency-Key"] = idempotencyKey;
     if (workspace) {
       headers["X-Workspace-Id"] = workspace.id;
@@ -117,7 +118,7 @@ export function createTransport({
         if (context.active?.id !== id) throw new Error(workspaceUnavailable);
         const scope = { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
         return options?.submit
-          ? options.submit(profileId, (idempotencyKey) => execute(token, path, { ...options, idempotencyKey }, scope), serverDate)
+          ? options.submit(profileId, (idempotencyKey, dispatch) => execute(token, path, { ...options, ...dispatch, idempotencyKey }, scope), serverDate)
           : execute(token, path, options, scope);
       });
     },

@@ -31,6 +31,7 @@ const migrations = [
    INSERT INTO offline_sequence VALUES (0);
    CREATE TABLE revocations (principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL, sequence INTEGER NOT NULL,
      PRIMARY KEY (principal, profile, workspace));`,
+  `ALTER TABLE revocations RENAME TO membership_events;`,
 ];
 
 export class OfflineStorageUnavailable extends Error {}
@@ -50,8 +51,8 @@ export async function nextOfflineSequence(db: SQLiteDatabase) {
   return row.value;
 }
 
-export function revokedAfter(db: SQLiteDatabase, principal: string, profile: string, workspace: string, sequence: number) {
-  return db.getFirstAsync(`SELECT 1 FROM revocations WHERE principal = ? AND profile = ? AND workspace = ? AND sequence > ?`,
+export function membershipChangedAfter(db: SQLiteDatabase, principal: string, profile: string, workspace: string, sequence: number) {
+  return db.getFirstAsync(`SELECT 1 FROM membership_events WHERE principal = ? AND profile = ? AND workspace = ? AND sequence > ?`,
     principal, profile, workspace, sequence);
 }
 

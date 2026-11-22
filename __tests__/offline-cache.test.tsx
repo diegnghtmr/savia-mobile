@@ -23,8 +23,9 @@ const cashFlow = "/v1/analytics/cash-flow?from=2026-11-01&to=2026-11-21";
 const monthly = "/v1/analytics/advanced?from=2026-11-01&to=2026-11-21&metric=monthly_savings_capacity";
 const calendar = "/v1/analytics/advanced?from=2026-11-21&to=2026-12-21&metric=financial_calendar";
 const subscriptions = "/v1/subscriptions?limit=5&status=detected";
+const forecasts = `/v1/forecasts/${first.id}`, scenarios = "/v1/scenarios?limit=20";
 const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`, "/v1/funds?limit=20", "/v1/funds?limit=20&cursor=fixture",
-  debts, projection, summary, cashFlow, monthly, calendar, subscriptions];
+  debts, projection, summary, cashFlow, monthly, calendar, subscriptions, forecasts, scenarios];
 
 function setup() {
   let online = true, denied = false, workspaces = [first, second], owner = profile;
@@ -77,11 +78,21 @@ test("cold offline restart reads only saved accounts, movements, budgets, funds,
   expect([...saved.values()].filter((value) => /^[a-f0-9]{64}$/.test(value))).toHaveLength(1);
 });
 
+test("does not persist import job responses for offline reuse", async () => {
+  const f = setup(), local = f.reopen(), show = jest.fn(), path = `/v1/import-jobs/${second.id}`;
+  await local.identity.select(first.id);
+  const scoped = local.scope(profile, first.id, f.api.requestInWorkspace, show);
+  await expect(scoped(first.id, path)).resolves.toMatchObject({ path });
+  f.setOnline(false);
+  await expect(f.reopen().scope(profile, first.id, f.api.requestInWorkspace, show)(first.id, path)).rejects.toMatchObject({ kind: "network" });
+  expect(show).not.toHaveBeenCalled();
+});
+
 test("cache never crosses workspace or signed-in profile and never replaces a permission error", async () => {
   const fx = setup(), local = fx.reopen(), stale = jest.fn();
   await local.identity.select(first.id);
   const read = local.scope(profile, first.id, fx.api.requestInWorkspace, stale);
-  const paths = [accounts, debts, projection, summary, cashFlow, monthly, calendar, subscriptions];
+  const paths = [accounts, debts, projection, summary, cashFlow, monthly, calendar, subscriptions, forecasts, scenarios];
   for (const path of paths) await read(first.id, path);
   fx.denyReads();
   for (const path of paths) await expect(read(first.id, path)).rejects.toMatchObject({ status: 403 });
@@ -241,4 +252,32 @@ test("a reopened scope cannot accept old data after a genuine regrant", async ()
   expect(await stale).toMatchObject({ message: "Este espacio ya no está disponible." });
   f.setOnline(false);
   await expect(other.scope(profile, first.id, f.api.requestInWorkspace, jest.fn())(first.id, accounts)).rejects.toThrow();
+});
+
+// Reviewer regression (verify mwrbkwrv). Append to __tests__/offline-cache.test.tsx (uses existing deferred helper).
+test("a delayed negative membership response from before regrant cannot revoke fresh cached data", async () => {
+  const f = setup(), firstProcess = f.reopen();
+  await firstProcess.identity.select(first.id);
+  const scoped = (process = firstProcess) => process.scope(profile, first.id, f.api.requestInWorkspace, jest.fn());
+  f.removeFirst();
+  await expect(firstProcess.identity.bootstrap()).resolves.toMatchObject({ active: null });
+  const normal = f.send.getMockImplementation()!, seen = deferred<void>(), release = deferred<void>();
+  let hold = true;
+  f.send.mockImplementation(async (url, init) => {
+    const captured = await normal(url, init);
+    if (new URL(url).pathname === "/v1/workspaces" && hold) {
+      hold = false; seen.release(); await release.result;
+    }
+    return captured;
+  });
+  const old = scoped()(first.id, accounts).catch(error => error);
+  await seen.result;
+  const reopened = f.reopen();
+  try {
+    f.rejoinFirst(); await reopened.identity.select(first.id);
+    await expect(scoped(reopened)(first.id, accounts)).resolves.toMatchObject({ workspace: first.id });
+  } finally { release.release(); }
+  await expect(old).resolves.toMatchObject({ message: "Este espacio ya no está disponible." });
+  f.setOnline(false);
+  await expect(scoped(f.reopen())(first.id, accounts)).resolves.toMatchObject({ workspace: first.id });
 });

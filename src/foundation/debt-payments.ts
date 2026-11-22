@@ -26,9 +26,19 @@ function paymentBody(input: unknown, currency: unknown, accounts: ReadonlyMap<st
     const split = parts.flatMap((part) => Object.hasOwn(row, part) ? [[part, nonnegative(row[part], currency)] as const] : []);
     if (split.length && split.reduce((sum, [, value]) => sum + BigInt(value.amountMinor), 0n) !== BigInt(totalAmount.amountMinor)) throw new TypeError();
     // Resolve the same split as the server, then send one stable representation for its fingerprint.
-    const nonzero = split.filter(([, value]) => value.amountMinor !== "0");
+    const resolved = new Map<(typeof parts)[number], typeof totalAmount>(split.length ? split : [["principalAmount", totalAmount]]);
+    const makeBody = (entries: Iterable<readonly [string, typeof totalAmount]>) =>
+      ({ accountId, totalAmount, ...Object.fromEntries(entries), occurredAt: `${date}T00:00:00.000Z` });
+    const nonzero = [...resolved].filter(([, value]) => value.amountMinor !== "0");
     const principalOnly = nonzero.length === 1 && nonzero[0][0] === "principalAmount";
-    return { accountId, totalAmount, ...Object.fromEntries(principalOnly ? [] : nonzero), occurredAt: `${date}T00:00:00.000Z` };
+    const body = makeBody(principalOnly ? [] : nonzero), legacy = [];
+    for (let mask = 1; mask < (1 << parts.length); mask++) {
+      const fields = parts.filter((_, index) => (mask & (1 << index)) !== 0);
+      if (!nonzero.every(([part]) => fields.includes(part))) continue;
+      const variant = makeBody(fields.map((part) => [part, resolved.get(part) ?? { amountMinor: "0", currency }]));
+      if (JSON.stringify(variant) !== JSON.stringify(body)) legacy.push(variant);
+    }
+    return { body, legacy };
   } catch { throw invalid(); }
 }
 
@@ -44,16 +54,18 @@ export function createDebtPayments(request: ScopedRequest, workspace: string, ac
     async pay(raw: unknown, currency: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
       const id = uuid(raw);
       if (!id || !scope) throw invalid();
-      const body = paymentBody(input, currency, accounts), path = `${debtsPath}/${id}/payments`, method = "POST";
+      const { body, legacy } = paymentBody(input, currency, accounts), path = `${debtsPath}/${id}/payments`, method = "POST";
+      const normalize = (value: typeof body) => JSON.stringify([method, path, value]);
       try {
         const result = await request(scope, path, { method, body, successStatus: 201,
-          submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, JSON.stringify([method, path, body]), async (key) => {
-            const row = debtRecord(await operation(key)), amount = debtRecord(row.amount), receipt = uuid(row.id);
+          submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, normalize(body), async (key, dispatched) => {
+            const row = debtRecord(await operation(key, { body: JSON.parse(dispatched!) })), amount = debtRecord(row.amount), receipt = uuid(row.id);
             if (!receipt || row.type !== "debt_payment" || row.status !== "confirmed" || uuid(row.accountId) !== body.accountId ||
               typeof row.occurredAt !== "string" || Date.parse(row.occurredAt) !== Date.parse(body.occurredAt) ||
               amount.currency !== body.totalAmount.currency || amount.amountMinor !== `-${body.totalAmount.amountMinor}`) throw new TypeError();
             return receipt;
-          }, { confirmation, serverDate }),
+          }, { confirmation, serverDate, body: JSON.stringify(body),
+            equivalents: legacy.map((value) => ({ normalized: normalize(value), body: JSON.stringify(value) })) }),
         });
         const receipt = uuid(result);
         if (!receipt) throw new TypeError();

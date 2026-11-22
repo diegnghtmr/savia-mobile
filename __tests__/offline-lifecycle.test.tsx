@@ -170,3 +170,47 @@ test("analytics keeps the offline banner when only one report falls back and cle
     await screen.findByText("Hogar: 0,12 COP · 100 %"); expect(screen.queryByRole("alert", banner)).toBeNull();
   } finally { await f.close(); }
 });
+
+// Reviewer regression (verify mwrbkwrv). Append to __tests__/offline-lifecycle.test.tsx.
+import { act } from "@testing-library/react-native";
+
+test("leaving a slow fresh report cannot clear the visible mixed report's offline banner", async () => {
+  const f = await setup();
+  try {
+    const network = jest.mocked(expoFetch), normal = network.getMockImplementation()!;
+    let pauseCalendar = false, cashOffline = false;
+    let reached!: () => void, resume!: () => void, sent!: () => void;
+    const holding = new Promise<void>(resolve => { reached = resolve; });
+    const release = new Promise<void>(resolve => { resume = resolve; });
+    const subscribed = new Promise<void>(resolve => { sent = resolve; });
+    network.mockImplementation(async (url, init) => {
+      const { pathname, searchParams } = new URL(String(url));
+      if (!pathname.startsWith("/v1/analytics/") && pathname !== "/v1/subscriptions") return normal(url, init);
+      const amount = { currency: "COP", amountMinor: "12" };
+      const from = searchParams.get("from")!, to = searchParams.get("to")!;
+      let body: unknown = { periodStart: from, periodEnd: to, baseCurrency: "COP", netWorth: amount, income: amount, expenses: amount, savingsCapacity: amount };
+      if (pathname.endsWith("/cash-flow")) {
+        if (cashOffline) throw new Error("cash flow temporarily offline");
+        body = { series: [], categories: [{ categoryId: account, categoryName: "Hogar", amount, percentage: 100 }] };
+      } else if (pathname.endsWith("/advanced")) {
+        const metric = searchParams.get("metric");
+        if (metric === "financial_calendar" && pauseCalendar) { reached(); await release; }
+        body = { metric, generatedAt: "2026-11-21T00:00:00Z", data: { periodStart: from, periodEnd: to, series: [], days: [] } };
+      } else if (pathname === "/v1/subscriptions") { body = page([]); sent(); }
+      return { status: 200, ok: true, headers: new Headers(), redirected: false, json: async () => body } as never;
+    });
+    const alert = { name: /Sin conexión — datos guardados el/ };
+    await press("Analítica"); await screen.findByText("Hogar: 0,12 COP · 100 %");
+    await press("Volver al resumen");
+    pauseCalendar = true;
+    await press("Resumen financiero");
+    await holding;
+    await press("Volver al resumen");
+    cashOffline = true;
+    await press("Analítica"); await screen.findByText("Hogar: 0,12 COP · 100 %");
+    await screen.findByRole("alert", alert);
+    await act(async () => { resume(); await subscribed; });
+    expect(screen.getByText("Hogar: 0,12 COP · 100 %")).toBeTruthy();
+    expect(screen.getByRole("alert", alert)).toBeTruthy();
+  } finally { await f.close(); }
+});
