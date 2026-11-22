@@ -1,12 +1,12 @@
 import type { ScopedRequest } from "./accounts";
 import type { Identity } from "./identity";
 import { workspaceUnavailable } from "./identity-draft";
-import { atomic, OfflineStorageUnavailable, offlineStore } from "./offline-db";
+import { OfflineStorageUnavailable, offlineStore, purgeOfflineScope } from "./offline-db";
 import { createOutbox } from "./outbox";
 import { isOfflineFailure } from "./transport";
 import type { WorkspaceContext } from "./workspace-context";
 
-const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|categories|payees|tags)(?:\?|$)/i;
+const cacheable = /^\/v1\/(?:accounts(?:\/[a-f\d-]{36}(?:\/balance)?)?|transactions(?:\/[a-f\d-]{36})?|budgets(?:\/[a-f\d-]{36})?|funds|categories|payees|tags)(?:\?|$)/i;
 const optional = <T>(operation: Promise<T>) => operation.catch(() => null);
 
 export function createOffline(identity: Identity, principal: () => Promise<string | null>) {
@@ -29,15 +29,23 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     // Commit revocation before any fallible purge. A regrant cannot reactivate old rows until their purge succeeds.
     if (before && stillAllowed.length < before.items.length) await publish({ ...before, items: stillAllowed,
       active: stillAllowed.find(({ id }) => id === before.active?.id) ?? null });
-    await atomic(db, async () => {
-      for (const table of ["cache", "outbox"]) await db.runAsync(
-        `DELETE FROM ${table} WHERE principal = ? AND (profile <> ? OR workspace NOT IN (SELECT value FROM json_each(?)))`,
-        owner, context?.profileId ?? "", JSON.stringify(stillAllowed.map(({ id }) => id)));
-      await publish(context);
-    });
+    const stale = await db.getAllAsync<{ profile: string; workspace: string }>(
+      `SELECT profile, workspace FROM cache WHERE principal = ? UNION SELECT profile, workspace FROM outbox WHERE principal = ?`, owner, owner);
+    const failed: { profile: string; workspace: string; cause: unknown }[] = [];
+    for (const scope of stale) {
+      if (scope.profile === context?.profileId && stillAllowed.some(({ id }) => id === scope.workspace)) continue;
+      try { await purgeOfflineScope(db, owner, scope.profile, scope.workspace); }
+      catch (cause) { failed.push({ ...scope, cause }); }
+    }
+    const items = context?.items.filter(({ id }) => !failed.some((scope) => scope.profile === context.profileId && scope.workspace === id));
+    const active = items?.find(({ id }) => id === context?.active?.id) ?? null;
+    await publish(context && { ...context, items: items!, active });
+    const affected = expected ?? context?.active?.id;
+    const failure = failed.find(({ workspace }) => workspace === affected);
+    if (failure) throw new Error(workspaceUnavailable, { cause: failure.cause });
+    if (!context && failed.length) throw new AggregateError(failed.map(({ cause }) => cause), "No pudimos borrar los datos sin conexión.");
   }).catch((error: unknown) => {
     if (error instanceof OfflineStorageUnavailable) return;
-    if (expected && !context?.items.some(({ id }) => id === expected)) throw new Error(workspaceUnavailable, { cause: error });
     throw error;
   });
   async function verified<T extends WorkspaceContext | null>(operation: () => Promise<T>, fallback = false): Promise<T> {

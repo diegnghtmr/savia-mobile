@@ -20,6 +20,14 @@ function Field({ label, value, change, disabled }: { label: string; value: strin
 
 type Edit = { mode: "create"; source?: BudgetDetail } | { mode: "metadata" | "allocations"; budget: BudgetDetail; etag: string };
 
+function AllocationSummary({ rows, names }: { rows: BudgetDetail["allocations"]; names?: Map<string, string> }) {
+  const name = (id: string) => names?.get(id) ?? `Categoría ${id}`;
+  return rows.length === 0 ? <Copy>Sin asignaciones.</Copy> : rows.map((row) => <View key={row.categoryId} style={{ gap: 4 }}>
+    <Copy>{name(row.categoryId)}</Copy><Copy>Planeado: {row.planned}</Copy><Copy>Ejecutado: {row.actual}</Copy><Copy>Disponible: {row.available}</Copy>
+    <Copy>Utilizado: {row.used}</Copy><Copy>Arrastre: {rollover[row.policy]}{row.target ? `: ${row.policy === "to_category" ? name(row.target) : row.target}` : ""}</Copy>
+  </View>);
+}
+
 function Detail({ api, id, edit, back }: { api: Budgets; id: string; edit?: (values: Edit) => void; back: () => void }) {
   const [data, setData] = useState<BudgetDetail | null>();
   const [attempt, retry] = useState(0);
@@ -28,7 +36,6 @@ function Detail({ api, id, edit, back }: { api: Budgets; id: string; edit?: (val
     void api.detail(id).then((value) => { if (current) setData(value); }, () => { if (current) setData(null); });
     return () => { current = false; };
   }, [api, id, attempt]);
-  const name = (id: string) => data?.names.get(id) ?? `Categoría ${id}`;
   return <AuthPanel>
     <AuthAction label="Volver a presupuestos" action={back} />
     {data === null ? <><Copy role="alert">No pudimos cargar el presupuesto.</Copy><AuthAction label="Reintentar" action={() => { setData(undefined); retry((old) => old + 1); }} /></>
@@ -40,11 +47,7 @@ function Detail({ api, id, edit, back }: { api: Budgets; id: string; edit?: (val
           <AuthAction label="Editar asignaciones" action={() => edit({ mode: "allocations", budget: data, etag: data.etag! })} />
         </>}
         <Copy role="header">Asignaciones por categoría</Copy>
-        {!data.allocations.length && <Copy>Sin asignaciones.</Copy>}
-        {data.allocations.map((row) => <View key={row.categoryId} style={{ gap: 4 }}>
-          <Copy>{name(row.categoryId)}</Copy><Copy>Planeado: {row.planned}</Copy><Copy>Ejecutado: {row.actual}</Copy><Copy>Disponible: {row.available}</Copy>
-          <Copy>Utilizado: {row.used}</Copy><Copy>Arrastre: {rollover[row.policy]}{row.target ? `: ${row.policy === "to_category" ? name(row.target) : row.target}` : ""}</Copy>
-        </View>)}
+        <AllocationSummary rows={data.allocations} names={data.names} />
       </>}
   </AuthPanel>;
 }
@@ -159,7 +162,8 @@ export function BudgetsScreen({ api, writes, back }: { api: Budgets; writes?: Bu
     {error && <><Copy role="alert">{error}</Copy>{retry.current && <AuthAction label="Reintentar" action={retry.current} />}</>}
     {!busy && !error && !page.items.length && <Copy>No hay presupuestos para estos filtros.</Copy>}
     {page.items.map((row) => <View key={row.id}><AuthAction label={row.name} action={() => setId(row.id)} />
-      <Copy>{row.periodStart} – {row.periodEnd} · {methods[row.method]}</Copy></View>)}
+      <Copy>{row.periodStart} – {row.periodEnd} · {methods[row.method]}</Copy>
+      <AllocationSummary rows={row.allocations} /></View>)}
     {page.nextCursor && !error && <AuthAction label="Cargar más" action={() => void load(applied, page.nextCursor ?? undefined)} disabled={busy} />}
   </AuthPanel>;
 }

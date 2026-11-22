@@ -96,3 +96,18 @@ test.each([
     "/v1/me", "/v1/workspaces", `/v1/budgets/${first}`, "/v1/me", "/v1/workspaces", "/v1/categories",
   ]);
 });
+
+// Reviewer regression (verify mwr87e91). Append to __tests__/budgets.test.tsx.
+test("shows exact allocation amounts and percentages on the budget list", async () => {
+  const { api } = setup("KWD");
+  await render(<BudgetsScreen api={api} back={jest.fn()} />);
+  await screen.findByRole("button", { name: "Hogar" });
+
+  const expected = [
+    "Planeado: 9007199254740993,012 KWD",
+    "Ejecutado: −4503599627370496,506 KWD",
+    "Disponible: 13510798882111489,518 KWD",
+    "Utilizado: −50,00 %",
+  ];
+  expect(expected.filter((text) => screen.queryByText(text))).toEqual(expected);
+});

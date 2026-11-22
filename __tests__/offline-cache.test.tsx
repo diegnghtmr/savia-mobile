@@ -17,7 +17,7 @@ const profile = "00000000-0000-4000-8000-000000000010", otherProfile = "00000000
 const first = { id: "00000000-0000-4000-8000-000000000020", name: "Casa" };
 const second = { id: "00000000-0000-4000-8000-000000000021", name: "Trabajo" };
 const accounts = "/v1/accounts?limit=20", movements = "/v1/transactions?limit=20", tags = "/v1/tags?limit=200";
-const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`];
+const recent = [accounts, movements, tags, "/v1/budgets?limit=20", `/v1/budgets/${first.id}`, "/v1/funds?limit=20", "/v1/funds?limit=20&cursor=fixture"];
 
 function setup() {
   let online = true, denied = false, workspaces = [first, second], owner = profile;
@@ -42,7 +42,7 @@ beforeEach(() => {
   jest.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => { saved.delete(key); });
 });
 
-test("cold offline restart reads only saved accounts, movements, budgets and catalogs and presents their saved date", async () => {
+test("cold offline restart reads only saved accounts, movements, budgets, funds and catalogs and presents their saved date", async () => {
   const fx = setup(), local = fx.reopen();
   await local.identity.select(first.id);
   const show = jest.fn();
@@ -137,4 +137,24 @@ test("verified removal cannot fall back to revoked data when SQLite refuses the 
   const restarted = fx.reopen();
   await expect(restarted.scope(profile, first.id, fx.api.requestInWorkspace, jest.fn())(first.id, accounts)).rejects.toThrow();
   await expect(restarted.identity.bootstrap()).rejects.toThrow();
+});
+
+// Reviewer regression (verify mwr87e91). Append to __tests__/offline-cache.test.tsx.
+test("a failed purge in a revoked workspace does not block fresh reads in a still-authorized workspace", async () => {
+  const f = setup(), offline = f.reopen();
+  await offline.identity.select(first.id);
+  const home = offline.scope(profile, first.id, f.api.requestInWorkspace, jest.fn());
+  await home(first.id, accounts);
+
+  await offline.identity.select(second.id);
+  const work = offline.scope(profile, second.id, f.api.requestInWorkspace, jest.fn());
+  await offlineStore()(db => db.execAsync(`CREATE TRIGGER reject_home_purge BEFORE DELETE ON cache
+    WHEN OLD.workspace = '${first.id}' BEGIN SELECT RAISE(ABORT, 'purge failed'); END`));
+
+  f.removeFirst();
+  f.send.mockClear();
+  await expect(work(second.id, accounts)).resolves.toEqual({ path: accounts, workspace: second.id });
+  expect(f.send.mock.calls.map(([url]) => url.replace("https://api.invalid", ""))).toEqual([
+    "/v1/me", "/v1/workspaces", accounts,
+  ]);
 });

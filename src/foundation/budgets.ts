@@ -2,6 +2,7 @@ import { isDay, isETag, money, type ScopedRequest } from "./accounts";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
+import { percentOf } from "./planning-money";
 import { uuid } from "./workspace-context";
 
 export const methods = { cash_flow: "Flujo de caja", zero_based: "Base cero", envelope: "Sobres", hybrid: "Híbrido" } as const;
@@ -37,13 +38,6 @@ function queryFor(input: unknown, workspace: string) {
   } catch { throw new InvalidDraft("Filtros de presupuestos no válidos."); }
 }
 
-function percentUsed(actual: bigint, planned: bigint) {
-  if (planned <= 0n) return "No aplica";
-  const magnitude = (actual < 0n ? -actual : actual) * 10000n;
-  const rounded = (magnitude + planned / 2n) / planned;
-  return `${actual < 0n && rounded > 0n ? "−" : ""}${rounded / 100n},${String(rounded % 100n).padStart(2, "0")} %`;
-}
-
 export function parseBudget(input: unknown) {
   const { id: raw, name, method, periodStart, periodEnd, currency, allocations, version } = budgetRecord(input), id = uuid(raw);
   if (!id || typeof name !== "string" || !name.trim() || !member(methods, method) || !day(periodStart) || !day(periodEnd) || periodStart >= periodEnd ||
@@ -53,7 +47,7 @@ export function parseBudget(input: unknown) {
     const categoryId = uuid(raw), target = uuid(rolloverTargetId);
     if (!categoryId || !member(rollover, policy) || (rolloverTargetId != null && !target)) throw new TypeError();
     const amounts = [planned, actual, available].map((amount) => money(amount, currency));
-    const used = percentUsed(BigInt(budgetRecord(actual).amountMinor as string), BigInt(budgetRecord(planned).amountMinor as string));
+    const used = percentOf(BigInt(budgetRecord(actual).amountMinor as string), BigInt(budgetRecord(planned).amountMinor as string));
     return { categoryId, planned: amounts[0], actual: amounts[1], available: amounts[2], used, policy, target };
   });
   if (new Set(lines.map(({ categoryId }) => categoryId)).size !== lines.length) throw new TypeError();

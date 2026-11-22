@@ -40,6 +40,20 @@ export async function atomic<T>(db: SQLiteDatabase, operation: () => Promise<T>)
   } catch (error) { await db.execAsync("ROLLBACK"); throw error; }
 }
 
+export function offlineMembership(db: SQLiteDatabase, principal: string, profile: string, workspace: string) {
+  return db.getFirstAsync<{ active: number | null }>(`SELECT json_extract(snapshot, '$.active.id') = ? AS active
+    FROM membership WHERE principal = ? AND profile = ? AND EXISTS (
+      SELECT 1 FROM json_each(snapshot, '$.items') WHERE json_extract(value, '$.id') = ?
+    )`, workspace, principal, profile, workspace);
+}
+
+export function purgeOfflineScope(db: SQLiteDatabase, principal: string, profile: string, workspace: string) {
+  return atomic(db, async () => {
+    for (const table of ["cache", "outbox"]) await db.runAsync(
+      `DELETE FROM ${table} WHERE principal = ? AND profile = ? AND workspace = ?`, principal, profile, workspace);
+  });
+}
+
 async function open() {
   const db = await openDatabaseAsync("savia-offline.db", { useNewConnection: true })
     .catch(() => { throw new OfflineStorageUnavailable("Encrypted offline storage unavailable"); });

@@ -144,3 +144,69 @@ test("queues a draft-status transaction offline and preserves that status at syn
   f.change("online"); await f.open().box.sync();
   expect(f.posts.map(({ path, body }) => [path, body.status])).toEqual([[txPath, "draft"]]);
 });
+
+// Reviewer regressions (verify mwr87e91). Append to __tests__/outbox.test.ts.
+import { offlineStore } from "../src/foundation/offline-db";
+
+test("a verified revoked workspace cannot expose its pending operations after a failed purge and reopen", async () => {
+  const f = fixture(), { ledger } = await f.ready();
+  f.change("offline");
+  await expect(ledger.create(tx)).rejects.toThrow(notice);
+  await offlineStore()(db => db.execAsync(
+    "CREATE TRIGGER fail_outbox_purge BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT, 'purge failed'); END",
+  ));
+
+  f.revoke();
+  f.change("online");
+  await f.open().box.sync();
+  expect(f.posts).toEqual([]);
+
+  f.change("offline");
+  await expect(f.open().box.list()).resolves.toEqual([]);
+});
+
+test.each(["transaction", "transfer", "exchange"])(
+  "%s: a lost confirmed reply re-ages the key before any normal drain after reopen",
+  async (kind) => {
+    const f = fixture(), x = await f.ready();
+    f.change("lose");
+    const creation = kind === "transaction" ? x.ledger.create(tx, undefined, {})
+      : kind === "transfer" ? x.transfers.submit(kind, transfer, undefined, {})
+      : x.transfers.submit("exchange", fx, undefined, {});
+    await expect(creation).rejects.toThrow(notice);
+
+    f.advance(23 * hour);
+    let box = f.open().box;
+    f.change("online");
+    await box.sync();
+    const [original] = await box.list();
+    expect(original.issue).toBe("expired");
+
+    f.change("lose");
+    await box.sync(original.id);
+    expect(await box.list()).toMatchObject([{ id: original.id, issue: null }]);
+    expect(f.posts).toHaveLength(2);
+    expect(new Set(f.posts.map(({ key }) => key)).size).toBe(2);
+
+    f.advance(23 * hour - 1000);
+    box = f.open().box;
+    await box.sync();
+    expect(f.posts[2]).toEqual(f.posts[1]);
+
+    f.advance(1000);
+    f.change("online");
+    box = f.open().box;
+    await box.sync();
+    expect(await box.list()).toMatchObject([{ id: original.id, issue: "expired" }]);
+
+    f.advance(2 * hour);
+    await box.sync();
+    expect(f.posts).toHaveLength(3);
+    expect(f.committed).toHaveLength(2);
+
+    const [newWarning] = await box.list();
+    await box.sync(newWarning.id);
+    expect(new Set(f.posts.map(({ key }) => key)).size).toBe(3);
+    expect(await box.list()).toEqual([]);
+  },
+);

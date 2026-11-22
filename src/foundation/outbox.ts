@@ -2,7 +2,7 @@ import { randomUUID } from "expo-crypto";
 import type { ScopedRequest } from "./accounts";
 import { workspaceUnavailable } from "./identity-draft";
 import { creationReceipt } from "./ledger-create";
-import type { offlineStore } from "./offline-db";
+import { offlineMembership, purgeOfflineScope, type offlineStore } from "./offline-db";
 import { OutboxQueued, PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSlot, pendingSubmission, readPendingRecord } from "./pending-submission";
 import { secureStorage } from "./session-store";
@@ -20,18 +20,24 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
   const forms = new WeakMap<object, { id: string; accepted: Set<string> }>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((listener) => listener());
-  const find = (principal: string, id: number) => store((db) => db.getFirstAsync<Entry>(`SELECT * FROM outbox WHERE ${scope} AND id = ?`, principal, profile, workspace, id));
+  const find = (principal: string, id: number) => store(async (db) => (await offlineMembership(db, principal, profile, workspace))?.active
+    ? db.getFirstAsync<Entry>(`SELECT * FROM outbox WHERE ${scope} AND id = ?`, principal, profile, workspace, id) : null);
   const list = async () => {
     const principal = await owner();
-    return principal ? store((db) => db.getAllAsync<Pick<Entry, "id" | "path" | "issue" | "queued_at">>(
-      `SELECT id, path, issue, queued_at FROM outbox WHERE ${scope} ORDER BY id`, principal, profile, workspace)) : [];
+    return principal ? store(async (db) => (await offlineMembership(db, principal, profile, workspace))?.active
+      ? db.getAllAsync<Pick<Entry, "id" | "path" | "issue" | "queued_at">>(
+        `SELECT id, path, issue, queued_at FROM outbox WHERE ${scope} ORDER BY id`, principal, profile, workspace) : []) : [];
   };
   let syncing: Promise<Map<number, string>> | undefined;
   async function run(confirmId?: number) {
     const receipts = new Map<number, string>(), principal = await owner();
     if (!principal) return receipts;
     for (;;) {
-      const item = await store((db) => db.getFirstAsync<Entry>(`SELECT * FROM outbox WHERE ${scope} ORDER BY id LIMIT 1`, principal, profile, workspace));
+      const item = await store(async (db) => {
+        const membership = await offlineMembership(db, principal, profile, workspace);
+        if (!membership) await purgeOfflineScope(db, principal, profile, workspace).catch(() => { /* Retry on the next sync; never use these rows. */ });
+        return membership?.active ? db.getFirstAsync<Entry>(`SELECT * FROM outbox WHERE ${scope} ORDER BY id LIMIT 1`, principal, profile, workspace) : null;
+      });
       if (!item || (item.issue && (item.issue !== "expired" || item.id !== confirmId || item.record === null))) return receipts;
       const body = JSON.parse(item.body) as object;
       try {
@@ -89,6 +95,7 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
     const command = normalize(path, body), legacy = await pendingSlot(workspace, profile, command);
     const slot = await pendingSlot(workspace, profile, JSON.stringify(["outbox", attempt.id, command]));
     const id = await store(async (db) => {
+      if (!(await offlineMembership(db, principal, profile, workspace))?.active) throw new Error(workspaceUnavailable);
       const existing = await db.getFirstAsync<{ id: number }>(`SELECT id FROM outbox WHERE ${scope} AND slot = ?`, principal, profile, workspace, slot);
       if (existing || attempt.accepted.has(slot)) return existing?.id;
       const claimed = await db.getFirstAsync(`SELECT id FROM outbox WHERE ${scope} AND legacy_slot = ?`, principal, profile, workspace, legacy);
@@ -119,7 +126,10 @@ export function createOutbox(store: ReturnType<typeof offlineStore>, owner: () =
     async discard(id: number) {
       if (syncing) await syncing;
       const principal = await owner();
-      if (principal) await store((db) => db.runAsync(`DELETE FROM outbox WHERE ${scope} AND id = ? AND issue IS NOT NULL`, principal, profile, workspace, id));
+      if (principal) await store(async (db) => {
+        if ((await offlineMembership(db, principal, profile, workspace))?.active) await db.runAsync(
+          `DELETE FROM outbox WHERE ${scope} AND id = ? AND issue IS NOT NULL`, principal, profile, workspace, id);
+      });
       changed();
     },
   };
