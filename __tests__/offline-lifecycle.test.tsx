@@ -295,3 +295,53 @@ test.each([false, true])("close-all purges tokens, cache and outbox after provid
     expect(screen.getByRole("alert")).toHaveTextContent("No pudimos cerrar todas las sesiones.");
   } finally { jest.useRealTimers(); await f.close(); }
 });
+
+test.each(["success", "logout 503", "refresh 503"] as const)("global sign-out isolates the captured principal on %s", async (mode) => {
+  const f = await setup(), other = uid(8);
+  const db = offlineStore(), tables = ["cache", "outbox", "membership"] as const;
+  const rows = (principal: string) => db(async (conn) => Promise.all(tables.map((table) =>
+    conn.getAllAsync(`SELECT * FROM ${table} WHERE principal = ? ORDER BY rowid`, principal))));
+  try {
+    await warmMovements(); f.online(false); await record(); f.online(true);
+    await press("Volver al resumen");
+    expect((await rows(profile)).map((items) => items.length)).toEqual([expect.any(Number), 1, 1]);
+    await db(async (conn) => {
+      await conn.runAsync("INSERT INTO cache SELECT ?, profile, workspace, path, payload, saved_at FROM cache WHERE principal = ?", other, profile);
+      await conn.runAsync(`INSERT INTO outbox (principal, profile, workspace, path, body, slot, key, queued_at, record, issue, legacy_slot)
+        SELECT ?, profile, workspace, path, body, slot, key, queued_at, record, issue, legacy_slot FROM outbox WHERE principal = ?`, other, profile);
+      await conn.runAsync("INSERT INTO membership SELECT ?, profile, snapshot FROM membership WHERE principal = ?", other, profile);
+    });
+    const otherBefore = JSON.stringify(await rows(other));
+    const network = jest.mocked(expoFetch), normal = network.getMockImplementation()!, traffic: string[] = [];
+    network.mockImplementation(async (input, init) => {
+      const url = new URL(String(input)); traffic.push(url.pathname + url.search);
+      if (!url.pathname.startsWith("/auth/v1/")) return normal(input, init);
+      return mode === "success" ? new Response(null, { status: 204 }) : new Response('{"code":"unexpected_failure","message":"unavailable"}',
+        { status: 503, headers: { "Content-Type": "application/json" } });
+    });
+    const origin = "https://project.invalid";
+    const { createAuth } = jest.requireActual<typeof import("../src/foundation/auth")>("../src/foundation/auth");
+    const key = "savia.auth." + Buffer.from(origin).toString("hex"), family = [key, `${key}-code-verifier`, `${key}-user`];
+    storage.set(key, JSON.stringify({ access_token: "fixture-access", refresh_token: "fixture-refresh", user: { id: profile },
+      expires_at: Math.floor(Date.now() / 1000) + 3600 }));
+    for (const auxiliary of family.slice(1)) storage.set(auxiliary, "fixture-auxiliary");
+    const auth = createAuth(origin, "sb_publishable_fixture");
+    jest.mocked(getAuth).mockReturnValue(auth);
+    await press("Sesiones"); await screen.findByText("No hay sesiones activas."); await press("Cerrar todas las sesiones");
+    const readSession = jest.spyOn(auth, "readSession"), signOut = jest.spyOn(auth, "signOut");
+    traffic.length = 0;
+    jest.useFakeTimers({ doNotFake: ["performance"] });
+    if (mode === "refresh 503") storage.set(key, JSON.stringify({ ...JSON.parse(storage.get(key)!), expires_at: Math.floor(Date.now() / 1000) - 1 }));
+    await press("Confirmar cierre");
+    await act(async () => { await jest.advanceTimersByTimeAsync(65_000); });
+    const warning = screen.queryByText("No pudimos cerrar todas las sesiones.");
+    expect({ signedOut: !!screen.queryByText("Iniciar sesión"), family: family.filter((slot) => storage.has(slot)), rows: await rows(profile) })
+      .toEqual({ signedOut: true, family: [], rows: [[], [], []] });
+    expect(JSON.stringify(await rows(other))).toBe(otherBefore);
+    expect(signOut.mock.calls).toEqual([["global"], []]);
+    expect(readSession).not.toHaveBeenCalled();
+    expect(traffic).toEqual(mode === "refresh 503"
+      ? Array(8).fill("/auth/v1/token?grant_type=refresh_token") : ["/auth/v1/logout?scope=global"]);
+    if (mode === "success") expect(warning).toBeNull(); else expect(warning).toBeTruthy();
+  } finally { jest.useRealTimers(); await f.close(); }
+});
