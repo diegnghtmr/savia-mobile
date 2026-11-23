@@ -306,3 +306,71 @@ test("review: a stale denial cannot purge data from a newer positive verificatio
   f.setOnline(false);
   await expect(scope(f.reopen())(first.id, accounts)).resolves.toEqual({ version: "fresh" });
 });
+
+// Reviewer regressions (verify mwsthel4). Append to __tests__/offline-cache.test.tsx (uses existing fixture and deferred helper).
+test("unchanged membership allows concurrent online reads to finish out of order", async () => {
+  const f = setup(), local = f.reopen();
+  await local.identity.select(first.id);
+  const send = f.send.getMockImplementation()!;
+  const seen = deferred<void>(), release = deferred<void>();
+  let hold = true;
+  f.send.mockImplementation(async (url, init) => {
+    const response = await send(url, init);
+    if (new URL(url).pathname === "/v1/workspaces" && hold) {
+      hold = false;
+      seen.release();
+      await release.result;
+    }
+    return response;
+  });
+
+  const read = local.scope(profile, first.id, f.api.requestInWorkspace, jest.fn());
+  const older = read(first.id, accounts).catch((error) => error);
+  await seen.result;
+  try {
+    await expect(read(first.id, movements)).resolves.toEqual({
+      path: movements, workspace: first.id,
+    });
+  } finally {
+    release.release();
+  }
+  await expect(older).resolves.toEqual({ path: accounts, workspace: first.id });
+});
+
+test("a newer complete membership response fences an older grant even with empty SQLite", async () => {
+  const f = setup(), oldProcess = f.reopen();
+  // A selection can predate the encrypted offline store.
+  saved.set(`savia.workspace.${profile}`, first.id);
+  const send = f.send.getMockImplementation()!;
+  const seen = deferred<void>(), release = deferred<void>();
+  let hold = true;
+  f.send.mockImplementation(async (url, init) => {
+    const response = await send(url, init);
+    if (new URL(url).pathname === "/v1/workspaces" && hold) {
+      hold = false;
+      seen.release();
+      await release.result;
+    }
+    return response;
+  });
+
+  const read = (process: ReturnType<typeof f.reopen>) =>
+    process.scope(profile, first.id, f.api.requestInWorkspace, jest.fn());
+  const older = read(oldProcess)(first.id, accounts).catch((error) => error);
+  await seen.result;
+  try {
+    f.removeFirst();
+    await expect(f.reopen().identity.bootstrap()).resolves.toMatchObject({
+      active: null, items: [second],
+    });
+  } finally {
+    release.release();
+  }
+
+  await expect(older).resolves.toMatchObject({
+    message: "Este espacio ya no está disponible.",
+  });
+  expect(f.send.mock.calls.some(([url]) => new URL(url).pathname === "/v1/accounts")).toBe(false);
+  f.setOnline(false);
+  await expect(read(f.reopen())(first.id, accounts)).rejects.toThrow();
+});

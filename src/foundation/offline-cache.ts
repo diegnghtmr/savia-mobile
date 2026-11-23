@@ -28,15 +28,23 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     };
     const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
     const before = row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
-    const known = started === undefined ? [] : await db.getAllAsync<{ profile: string; workspace: string; sequence: number }>(
-      "SELECT profile, workspace, sequence FROM membership_versions WHERE principal = ?", owner);
-    const fenced = known.filter(({ sequence }) => sequence > started!);
-    const protectedScopes = fenced.filter((scope) => scope.profile === fresh?.profileId || scope.profile === before?.profileId);
-    if (protectedScopes.some(({ workspace }) => expected === undefined || workspace === expected)) throw new Error(workspaceUnavailable);
-    // An old response for an unaffected workspace cannot change the membership of a fenced workspace.
-    const protectedInProfile = (id: string) => fenced.some((scope) => scope.profile === fresh?.profileId && scope.workspace === id);
-    const context = fresh && { ...fresh, items: [...fresh.items.filter(({ id }) => !protectedInProfile(id)),
-      ...(before?.profileId === fresh.profileId ? before.items.filter(({ id }) => protectedInProfile(id)) : [])] };
+    const context = fresh;
+    const profile = context?.profileId ?? "", grants = new Set(context?.items.map(({ id }) => id));
+    if (started !== undefined) {
+      const newer = await db.getAllAsync<{ profile: string; workspace: string }>(
+        "SELECT profile, workspace FROM membership_versions WHERE principal = ? AND sequence > ?", owner, started);
+      if (newer.length) {
+        // The empty workspace marks a complete response, including an empty set of grants.
+        if (!newer.some((row) => row.profile === profile && row.workspace === "")) throw new Error(workspaceUnavailable);
+        const newest = new Set(newer.filter((row) => row.profile === profile && row.workspace !== "").map(({ workspace }) => workspace));
+        const matches = expected === undefined
+          ? grants.size === newest.size && [...grants].every((id) => newest.has(id)) && context?.active?.id === before?.active?.id
+          : grants.has(expected) === newest.has(expected);
+        if (!matches) throw new Error(workspaceUnavailable);
+        // An agreeing old response may authorize a new dispatch, but must not publish old membership data.
+        return expected && grants.has(expected) ? nextOfflineSequence(db) : started;
+      }
+    }
     const stillAllowed = before?.profileId === context?.profileId
       ? context?.items.filter(({ id }) => before?.items.some((item) => item.id === id)) ?? [] : [];
     const lost = before?.items.filter(({ id }) => !stillAllowed.some((item) => item.id === id))
@@ -48,16 +56,11 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       for (const { profile, workspace } of scopes) await db.runAsync("INSERT OR REPLACE INTO membership_events VALUES (?, ?, ?, ?)", owner, profile, workspace, sequence);
       return sequence;
     };
-    // A full membership response also verifies absences for previously known scopes.
-    const verified = new Map<string, { profile: string; workspace: string }>();
-    for (const scope of [...known.filter(({ profile }) => profile === fresh?.profileId || profile === before?.profileId),
-      ...lost, ...(fresh?.items.map(({ id }) => ({ profile: fresh.profileId, workspace: id })) ?? [])]) {
-      verified.set(`${scope.profile}:${scope.workspace}`, scope);
-    }
-    if (verified.size || lost.length) await atomic(db, async () => {
-      if (started !== undefined) for (const { profile, workspace } of verified.values()) await db.runAsync(
-        `INSERT INTO membership_versions VALUES (?, ?, ?, ?) ON CONFLICT(principal, profile, workspace)
-         DO UPDATE SET sequence = excluded.sequence WHERE excluded.sequence > membership_versions.sequence`, owner, profile, workspace, started);
+    if (started !== undefined || lost.length) await atomic(db, async () => {
+      if (started !== undefined) {
+        await db.runAsync("DELETE FROM membership_versions WHERE principal = ?", owner);
+        for (const workspace of ["", ...grants]) await db.runAsync("INSERT INTO membership_versions VALUES (?, ?, ?, ?)", owner, profile, workspace, started);
+      }
       // Publish revocation and fence already-authorized data before fallible deletion.
       if (lost.length) {
         await recordEvents(lost);
