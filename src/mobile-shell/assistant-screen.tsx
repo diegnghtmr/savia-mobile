@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRunResult } from "../foundation/agent-events";
-import type { Approval, Assistant, Decision } from "../foundation/assistant";
+import { ApprovalDecisionForbidden, type Approval, type Assistant, type Decision } from "../foundation/assistant";
 import { InvalidDraft } from "../foundation/identity-draft";
 import { TransportError } from "../foundation/transport";
 import { AuthAction, AuthPanel } from "./auth-gate";
@@ -45,10 +45,11 @@ export function AssistantScreen({ api, back }: { api: Assistant; back: () => voi
     setReviewed(row); setRoute("detail");
   }
   function decide(decision: Decision) {
-    if (!reviewed) return;
+    if (!reviewed?.canDecide) return;
     void write.run(async (permit) => {
       try { setReviewed(await api.decide(reviewed, decision, permit)); }
       catch (error) {
+        if (error instanceof ApprovalDecisionForbidden) setReviewed({ ...reviewed, canDecide: false });
         if (!(error instanceof TransportError) || error.status !== 412) throw error;
         await inspect(reviewed.id);
         throw new InvalidDraft("La propuesta cambió. Revisa los datos actualizados.");
@@ -99,10 +100,10 @@ export function AssistantScreen({ api, back }: { api: Assistant; back: () => voi
         <ReportText>Acción: {reviewed.toolName}</ReportText><ReportText>Riesgo: {reviewed.risk}</ReportText>
         <ReportText>Estado: {reviewed.label}</ReportText><ReportText>Vence: {reviewed.expiresAt}</ReportText>
         <ReportText role="header">Datos de la propuesta</ReportText><ReportText>{reviewed.preview}</ReportText>
-        {reviewed.status === "pending" && <>
+        {reviewed.status === "pending" && (reviewed.canDecide ? <>
           <AuthAction label="Aprobar propuesta" disabled={locked} action={() => decide("confirm")} />
           <AuthAction label="Rechazar propuesta" disabled={locked} action={() => decide("reject")} />
-        </>}
+        </> : <ReportText>Vista de solo lectura.</ReportText>)}
       </>}
     </>}
     {write.confirm && <><AuthAction label="Confirmar reintento" disabled={write.busy} action={write.confirm} />

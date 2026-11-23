@@ -3,7 +3,7 @@ import { fundRecord } from "./funds";
 import { InvalidDraft } from "./identity-draft";
 import { onlineCapability } from "./online-capability";
 import type { PendingSubmissionExpired } from "./pending-expiry";
-import { pendingSubmission } from "./pending-submission";
+import { memoryPendingJournal, pendingSubmission } from "./pending-submission";
 import { uuid } from "./workspace-context";
 
 const path = "/v1/ai/credentials", unavailable = "Credenciales de IA no disponibles.";
@@ -24,7 +24,7 @@ function credential(raw: unknown, profile: string) {
   if (!id || !bounded(providerId, 80) || !providerName.test(providerId) || (ownerType !== "user" && (ownerType !== "workspace" || ownerSubjectId !== null)) ||
     !bounded(credentialType, 32) || ![...creatable, "oauth"].includes(credentialType) || (status !== "active" && status !== "disabled" && status !== "revoked")) throw new TypeError();
   const mask = typeof maskedIdentifier === "string" && /^[•*]{4}[A-Za-z0-9_-]{0,4}$/.test(maskedIdentifier) ? maskedIdentifier : "••••";
-  const tag = typeof version === "number" && Number.isSafeInteger(version) && version > 0 ? `"${version}"` : null;
+  const tag = typeof version === "number" && Number.isSafeInteger(version) && version >= 0 ? `"${version}"` : null;
   return { id, providerId, ownerType, credentialType, status, mask, alias: bounded(alias, 120) ? alias : null, tag } as const;
 }
 export type Credential = NonNullable<ReturnType<typeof credential>>;
@@ -48,8 +48,7 @@ export function createAICredentials(request: ScopedRequest, workspace: string) {
   const scope = uuid(workspace) ?? "", call = onlineCapability(request, scope);
   let choices: ProviderChoice[] = [], rows: Credential[] = [];
   // Secrets and secret-derived fingerprints stay in this view's memory. Reopen by reviewing the list, not by restoring a secret draft.
-  const pending = new Map<string, string>(), journal = { getItem: async (slot: string) => pending.get(slot) ?? null,
-    setItem: async (slot: string, value: string) => { pending.set(slot, value); }, removeItem: async (slot: string) => { pending.delete(slot); } };
+  const journal = memoryPendingJournal();
   function write<T>(method: "POST" | "PATCH" | "DELETE" | "PUT", route: string, body: object | undefined, status: number,
     parse: (result: unknown, profile: string) => T, confirmation?: PendingSubmissionExpired, ifMatch?: string) {
     return call(route, { method, body, ifMatch, successStatus: status,

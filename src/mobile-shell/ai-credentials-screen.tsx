@@ -44,9 +44,12 @@ export function AICredentialsScreen({ api, back }: { api: AICredentials; back: (
         <PlanningField label="Alias (opcional)" value={alias} change={setAlias} busy={locked} />
         <PrivateField label="Secreto del proveedor" value={secret} change={setSecret} busy={locked} />
         <PrivateField label="Metadatos JSON (opcional)" value={metadata} change={setMetadata} busy={locked} />
-        <AuthAction label="Agregar credencial" disabled={locked} action={() => void write.run(async (permit) => {
-          setNotice(""); putRows(await api.add(choice, owner, secret, alias, metadata, permit)); setSecret(""); setMetadata(""); setAlias(""); setNotice("Credencial guardada.");
-        }, saveError)} />
+        <AuthAction label="Agregar credencial" disabled={locked} action={() => {
+          setSecret(""); setMetadata("");
+          void write.run(async (permit) => {
+            setNotice(""); putRows(await api.add(choice, owner, secret, alias, metadata, permit)); setAlias(""); setNotice("Credencial guardada.");
+          }, saveError);
+        }} />
       </>}
       <ReportText role="header">Credenciales guardadas</ReportText>
       {!data.rows.length && <ReportText>No hay credenciales guardadas.</ReportText>}
@@ -61,14 +64,17 @@ export function AICredentialsScreen({ api, back }: { api: AICredentials; back: (
         <PrivateField label="Nuevo secreto (opcional)" value={replacement} change={setReplacement} busy={locked} />
         <AuthAction label="Credencial activa" selected={active} disabled={locked} action={() => setActive(!active)} />
         <AuthAction label="Cancelar edición" disabled={locked} action={() => { closeEdit(); write.clear(); }} />
-        <AuthAction label="Guardar cambios de credencial" disabled={locked} action={() => void write.run(async (permit) => {
-          try { putRows(await api.edit(edit, editAlias, active ? "active" : "disabled", replacement, permit)); }
-          catch (error) {
-            if (!(error instanceof TransportError) || error.kind !== "http" || error.status !== 412) throw error;
-            await refresh(); throw new InvalidDraft("La credencial cambió. Revisa los datos actualizados.");
-          }
-          closeEdit(); setNotice("Credencial guardada.");
-        }, saveError)} />
+        <AuthAction label="Guardar cambios de credencial" disabled={locked} action={() => {
+          setReplacement("");
+          void write.run(async (permit) => {
+            try { putRows(await api.edit(edit, editAlias, active ? "active" : "disabled", replacement, permit)); }
+            catch (error) {
+              if (!(error instanceof TransportError) || error.kind !== "http" || (error.status !== 409 && error.status !== 412)) throw error;
+              await refresh(); throw new InvalidDraft("La credencial cambió. Revisa los datos actualizados.");
+            }
+            closeEdit(); setNotice("Credencial guardada.");
+          }, saveError);
+        }} />
       </>}
       {data.rows.map((row) => <AuthAction key={`revoke:${row.id}`} label={`Revocar credencial: ${label(row)}`} disabled={locked} action={() => {
         setRemove(row); closeEdit(); setNotice(""); write.clear();

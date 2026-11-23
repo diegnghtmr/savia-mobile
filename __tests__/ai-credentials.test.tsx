@@ -17,7 +17,7 @@ const credentials = "/v1/ai/credentials", detail = `${credentials}/${id}`, oldSe
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 const type = async (name: string, value: string) => fireEvent.changeText(await screen.findByLabelText(name), value);
 const capabilityWrites = () => jest.mocked(Storage.setItemAsync).mock.calls.filter(([slot]) => slot !== "savia.offline.key.v1");
-function setup() {
+function setup(conflict = 412) {
   jest.clearAllMocks(); mockReadSession.mockResolvedValue({ accessToken: "fixture" });
   const store = new Map([[`savia.workspace.${profile}`, workspace]]);
   jest.mocked(Storage.getItemAsync).mockImplementation(async (key) => store.get(key) ?? null);
@@ -44,7 +44,7 @@ function setup() {
     writes.push({ method, path, body: init.body ? JSON.parse(init.body as string) : undefined, key: headers.get("Idempotency-Key"), tag: headers.get("If-Match") });
     if (path === credentials && method === "POST") { if (lose-- > 0) throw new Error("lost response"); exists = true; return reply(row(), 201); }
     if (path === detail && method === "PATCH") {
-      if (version++ === 7) return reply({}, 412);
+      if (version++ === 7) return reply({}, conflict);
       const body = writes.at(-1)?.body as { status?: string }; status = body.status ?? status; return reply(row());
     }
     if (path === "/v1/ai/default-model" && method === "PUT") return reply(null, 204);
@@ -54,19 +54,21 @@ function setup() {
   return { writes, fetch, advance: () => { now += 23 * 3600_000; }, missing: (code: number) => { missing = code; }, revoke: () => { revoked = true; } };
 }
 
-test("AI credentials validate locally, keep secret retries in memory, and require a fresh explicit version after 412", async () => {
-  const f = setup(); await render(<Index />); await press("Credenciales de IA");
+test.each([412, 409])("AI credentials validate locally, keep secret retries in memory, and require a fresh explicit version after %i", async (conflict) => {
+  const f = setup(conflict); await render(<Index />); await press("Credenciales de IA");
   await screen.findByText("No hay credenciales guardadas.");
   expect(screen.queryByRole("button", { name: /Bloqueado|oauth/ })).toBeNull();
   await press("OpenAI · api_key"); await press("Del espacio"); await type("Alias (opcional)", "Equipo");
   mockReadSession.mockClear(); f.fetch.mockClear(); await press("Agregar credencial");
   expect(await screen.findByText("Ingresa un secreto válido.")).toBeTruthy(); expect(mockReadSession).not.toHaveBeenCalled(); expect(f.fetch).not.toHaveBeenCalled();
   expect(screen.getByLabelText("Secreto del proveedor").props.secureTextEntry).toBe(true);
-  await type("Secreto del proveedor", oldSecret);
-  for (let i = 0; i < 2; ++i) { await press("Agregar credencial"); await screen.findByText("No pudimos guardar la credencial."); }
+  for (let i = 0; i < 2; ++i) {
+    await type("Secreto del proveedor", oldSecret); await press("Agregar credencial"); await screen.findByText("No pudimos guardar la credencial.");
+  }
   expect(f.writes).toEqual([{ method: "POST", path: credentials, body: { providerId: "openai", credentialType: "api_key", ownerType: "workspace", alias: "Equipo", secret: oldSecret }, key: expect.any(String), tag: null }, f.writes[0]]);
   expect(capabilityWrites()).toEqual([]);
-  f.advance(); await press("Agregar credencial"); await screen.findByRole("button", { name: "Confirmar reintento" }); expect(f.writes).toHaveLength(2);
+  f.advance(); await type("Secreto del proveedor", oldSecret); await press("Agregar credencial");
+  await screen.findByRole("button", { name: "Confirmar reintento" }); expect(f.writes).toHaveLength(2);
   await press("Confirmar reintento"); await screen.findByText("Equipo · ••••"); expect(f.writes[2].key).not.toBe(f.writes[1].key);
   expect(screen.getByLabelText("Secreto del proveedor").props.value).toBe("");
   expect(screen.queryByText(/test-private-key/)).toBeNull();
@@ -90,4 +92,59 @@ test("only verified absent AI routes are unavailable and revoked workspaces cann
   await screen.findByText("Credenciales de IA no disponibles."); expect(screen.queryByRole("button", { name: "Agregar credencial" })).toBeNull();
   f.revoke(); f.fetch.mockClear(); await press("Actualizar credenciales"); await screen.findByText("No pudimos cargar las credenciales de IA.");
   expect(f.fetch.mock.calls.every(([url]) => typeof url === "string" && ["/v1/me", "/v1/workspaces"].includes(new URL(url).pathname))).toBe(true);
+});
+
+// Reviewer regressions (verify mwtkxri2). Append to __tests__/ai-credentials.test.tsx.
+test("failed credential registration clears the secret instead of supplying it to the next render", async () => {
+  const f = setup(); await render(<Index />); await press("Credenciales de IA");
+  await screen.findByText("No hay credenciales guardadas."); await press("OpenAI · api_key");
+  await type("Secreto del proveedor", oldSecret); await press("Agregar credencial");
+  await screen.findByText("No pudimos guardar la credencial.");
+  expect(f.writes).toHaveLength(1);
+  expect(capabilityWrites()).toEqual([]);
+  expect(screen.getByLabelText("Secreto del proveedor").props.value.length).toBe(0);
+});
+
+test("initial version zero is editable with a strong If-Match tag", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  let patched = false;
+  const record = { id, providerId: "openai", ownerType: "workspace", ownerSubjectId: null, credentialType: "api_key",
+    maskedIdentifier: "••••1234", alias: "Nueva", version: 0, status: "active", createdAt: "2026-11-22T00:00:00Z" };
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === credentials && init.method === "GET") {
+      return { status: 200, ok: true, redirected: false, headers: new Headers(), json: async () => [record] };
+    }
+    if (path === detail && init.method === "PATCH") {
+      expect(new Headers(init.headers).get("If-Match")).toBe('"0"');
+      expect(JSON.parse(String(init.body))).toEqual({ replacementSecret: newSecret });
+      patched = true;
+      return { status: 200, ok: true, redirected: false, headers: new Headers(), json: async () => ({ ...record, version: 1 }) };
+    }
+    return normal(url, init);
+  });
+  await render(<Index />); await press("Credenciales de IA");
+  await screen.findByText("Nueva · ••••1234");
+  expect(screen.getByRole("button", { name: "Editar credencial: Nueva" }).props.accessibilityState?.disabled).toBe(false);
+  await press("Editar credencial: Nueva"); await type("Nuevo secreto (opcional)", newSecret);
+  await press("Guardar cambios de credencial"); await screen.findByText("Credencial guardada.");
+  expect(patched).toBe(true);
+});
+
+test("ordinary rotation failure clears the replacement secret on the still-visible form", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === credentials && init.method === "GET") return {
+      status: 200, ok: true, redirected: false, headers: new Headers(), json: async () => [{ id, providerId: "openai",
+        ownerType: "workspace", ownerSubjectId: null, credentialType: "api_key", maskedIdentifier: "••••1234", alias: "Equipo", version: 8, status: "active" }],
+    };
+    if (path === detail && init.method === "PATCH") return { status: 503, ok: false, redirected: false, headers: new Headers(), json: async () => ({}) };
+    return normal(url, init);
+  });
+  await render(<Index />); await press("Credenciales de IA");
+  await press("Editar credencial: Equipo"); await type("Nuevo secreto (opcional)", newSecret);
+  await press("Guardar cambios de credencial"); await screen.findByText("No pudimos guardar la credencial.");
+  expect(capabilityWrites()).toEqual([]);
+  expect(screen.getByLabelText("Nuevo secreto (opcional)").props.value.length).toBe(0);
 });

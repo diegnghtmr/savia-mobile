@@ -17,6 +17,7 @@ import { createFunds } from "../foundation/funds";
 import { createIdentity } from "../foundation/identity";
 import { createImportCommits } from "../foundation/import-commits";
 import { createImports, type StatementFileSource } from "../foundation/imports";
+import { createMembers } from "../foundation/members";
 import { createInbox } from "../foundation/notification-inbox";
 import { createNotificationPreferences, type PushTokenSource } from "../foundation/notification-preferences";
 import { createOffline } from "../foundation/offline-cache";
@@ -40,6 +41,7 @@ import { ForecastsScreen } from "../mobile-shell/forecasts-screen";
 import { FundsScreen } from "../mobile-shell/funds-screen";
 import { defaultReceiptSource } from "../mobile-shell/image-picker-source";
 import { ImportsScreen } from "../mobile-shell/imports-screen";
+import { MembersScreen } from "../mobile-shell/members-screen";
 import { NotificationInbox } from "../mobile-shell/notification-inbox";
 import { NotificationSettings } from "../mobile-shell/notification-settings";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
@@ -61,7 +63,7 @@ export function SaviaMobile(sources: Sources) {
     home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
 function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
   const latest = useRef(0);
@@ -105,7 +107,7 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
       transfers: createTransfers(queued(scoped), id, transactions.transferAccounts), budgets: budgets(scoped), budgetViews: views(budgets), budgetWrites: createBudgetWrites(scoped, id),
       funds: funds(scoped), fundViews: views(funds), debts: debts(scoped), debtViews: views(debts), analytics: createAnalytics(scoped, id, reportBatch), forecasts: createForecasts(scoped, id), scenarios: createScenarios(scoped, id),
       receipts, receiptConfirmations: createReceiptConfirmations(scoped, id, receipts.detail, transactions.transferAccounts),
-      inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id), assistant: createAssistant(scoped, id), aiCredentials: createAICredentials(scoped, id), access: createAccess(scoped, id),
+      inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id), assistant: createAssistant(scoped, id), aiCredentials: createAICredentials(scoped, id), access: createAccess(scoped, id), members: createMembers(scoped, id),
       imports: createImports(scoped, id), importCommits: createImportCommits(scoped, id, transactions.transferAccounts) };
   }, [accountWrites, box, profile, id, generation]);
   const back = () => show("home");
@@ -126,11 +128,12 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
     : route === "assistant" ? <AssistantScreen api={apis.assistant} back={back} />
     : route === "ai-credentials" ? <AICredentialsScreen api={apis.aiCredentials} back={back} />
     : route === "access" ? <AccessScreen api={apis.access} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} />}</>;
+    : route === "members" ? <MembersScreen api={apis.members} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -163,6 +166,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openAssistant && <AuthAction label="Asistente" action={openAssistant} />}
         {openAICredentials && <AuthAction label="Credenciales de IA" action={openAICredentials} />}
         {openAccess && <AuthAction label="Accesos de MCP y CLI" action={openAccess} />}
+        {openMembers && <AuthAction label="Miembros del espacio" action={openMembers} />}
       </ScrollView>
     </SafeAreaView>
   );

@@ -15,7 +15,7 @@ jest.mock("../src/foundation/auth", () => ({ getAuth: () => ({ readSession: asyn
 const ids = [1, 2, 3, 4].map((id) => `00000000-0000-4000-8000-00000000000${id}`);
 const [profile, workspace, conversation, approval] = ids;
 const at = "2026-11-22T00:00:00Z", conv = { id: conversation, title: "Mis gastos", createdAt: at, updatedAt: at };
-const row = (version: number, status = "pending") => ({ id: approval, toolName: "create_transaction", riskClass: "financial_write", argumentsHash: `hash-${version}`,
+const row = (version: number, status = "pending", createdBy: unknown = profile) => ({ id: approval, createdBy, toolName: "create_transaction", riskClass: "financial_write", argumentsHash: `hash-${version}`,
   preview: { amountMinor: String(version * 1000), currency: "COP" }, status, expiresAt: "2026-11-24T00:00:00Z" });
 const list = (items: unknown[]) => ({ items, pageInfo: { hasNextPage: false } });
 const conversations = "/v1/agent/conversations", approvals = "/v1/approvals", detail = `${approvals}/${approval}`, messages = `${conversations}/${conversation}/messages`;
@@ -35,7 +35,8 @@ function setup() {
   jest.mocked(Storage.getItemAsync).mockImplementation(async (key) => saved.get(key) ?? null);
   jest.mocked(Storage.setItemAsync).mockImplementation(async (key, value) => { saved.set(key, value); });
   jest.mocked(Storage.deleteItemAsync).mockImplementation(async (key) => { saved.delete(key); });
-  let now = Date.parse(at), lost = 2, version = 1, revoked = false, offline = false, inboxStatus = 200;
+  let now = Date.parse(at), lost = 2, version = 1, revoked = false, offline = false, inboxStatus = 200, denied = false;
+  let creator: unknown = profile;
   const json = (body: unknown, status = 200) => ({ status, ok: status < 300, redirected: false,
     headers: new Headers({ Date: new Date(now).toUTCString() }), json: async () => body });
   (send as unknown as jest.Mock).mockImplementation(async (url: string, options: RequestInit) => {
@@ -52,13 +53,18 @@ function setup() {
       return stream();
     }
     if (path === approvals) { expect(searchParams.get("status")).toBe("pending"); return json(list([row(version)]), inboxStatus); }
-    if (path === detail) return json(row(version));
+    if (path === detail) {
+      const result: { createdBy?: unknown } = row(version, "pending", creator);
+      if (creator === undefined) delete result.createdBy;
+      return json(result);
+    }
     expect(headers.get("If-Match")).toBeNull();
+    if (denied && (path === `${detail}/confirm` || path === `${detail}/reject`)) return json({}, 403);
     if (path === `${detail}/reject`) return json(row(version, "rejected"));
     if (path === `${detail}/confirm`) return version++ === 1 ? json({}, 412) : json(row(2, "approved"));
     throw new Error("unexpected route");
   });
-  return { calls, advance: () => { now += 23 * 3600_000; }, revoke: () => { revoked = true; }, offline: () => { offline = true; }, inbox: (status: number) => { inboxStatus = status; } };
+  return { calls, advance: () => { now += 23 * 3600_000; }, revoke: () => { revoked = true; }, offline: () => { offline = true; }, inbox: (status: number) => { inboxStatus = status; }, deny: () => { denied = true; }, creator: (value: unknown) => { creator = value; } };
 }
 
 test("assistant validates before session, fences replays by server Date, and requires review of a changed approval", async () => {
@@ -108,6 +114,25 @@ test("the creator-only detail path can reject without the collection; a revoked 
   await change("Identificador de la propuesta", approval); await press("Consultar propuesta");
   expect(await screen.findByText("No pudimos verificar la propuesta.")).toBeTruthy();
   expect((send as unknown as jest.Mock).mock.calls.map(([url]) => new URL(url).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
+});
+
+test.each([undefined, "not-a-uuid", conversation])("creator %s is not verified and the preview is read-only", async (createdBy) => {
+  const f = setup(); f.creator(createdBy); await render(<Index />); await press("Asistente");
+  await screen.findByText("No hay conversaciones."); await press("Propuestas pendientes");
+  await press("Revisar: create_transaction"); expect(await screen.findByText(/1000/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^(Aprobar|Rechazar) propuesta$/ })).toBeNull();
+  expect(screen.getByText("Vista de solo lectura.")).toBeTruthy(); expect(f.calls).toEqual([]);
+});
+
+test.each([["Aprobar propuesta", "confirm"], ["Rechazar propuesta", "reject"]])("a decision 403 after %s leaves the approval read-only", async (button, action) => {
+  const f = setup(); f.deny(); await render(<Index />); await press("Asistente");
+  await screen.findByText("No hay conversaciones."); await press("Propuestas pendientes");
+  await press("Revisar: create_transaction"); await screen.findByText(/1000/);
+  await press(button);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Solo quien creó la propuesta puede decidir.");
+  expect(screen.getByText(/1000/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^(Aprobar|Rechazar) propuesta$/ })).toBeNull();
+  expect(f.calls).toEqual([{ path: `${detail}/${action}`, key: expect.any(String), body: { argumentsHash: "hash-1" } }]);
 });
 
 // Reviewer regression (verify mwtk0xwr). Append to __tests__/assistant.test.tsx.

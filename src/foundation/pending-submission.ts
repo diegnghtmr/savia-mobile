@@ -7,6 +7,12 @@ import { uuid } from "./workspace-context";
 const inFlight = new Map<string, Promise<unknown>>();
 const hash = (value: string) => digestStringAsync(CryptoDigestAlgorithm.SHA256, value);
 
+export function memoryPendingJournal(): typeof secureStorage {
+  const records = new Map<string, string>();
+  return { getItem: async (slot) => records.get(slot) ?? null, setItem: async (slot, value) => { records.set(slot, value); },
+    removeItem: async (slot) => { records.delete(slot); } };
+}
+
 export function readPendingRecord(raw: string | null) {
   if (raw === null) return null;
   try {

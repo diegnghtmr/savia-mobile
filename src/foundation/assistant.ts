@@ -19,11 +19,12 @@ function conversation(input: unknown) {
   if (!id || typeof title !== "string" || !date(createdAt) || !date(updatedAt)) throw new TypeError();
   return { id, title };
 }
-function approval(input: unknown, expected?: string) {
-  const { id: raw, toolName, riskClass, argumentsHash, preview, status, expiresAt } = fundRecord(input), id = uuid(raw);
+function approval(input: unknown, expected?: string, profile?: string) {
+  const { id: raw, toolName, riskClass, argumentsHash, preview, status, expiresAt, createdBy } = fundRecord(input), id = uuid(raw), creator = uuid(createdBy);
   if (!id || (expected && id !== expected) || typeof toolName !== "string" || !toolName.trim() || !member(risks, riskClass) || !member(states, status) ||
     !date(expiresAt) || typeof argumentsHash !== "string" || !argumentsHash.trim() || argumentsHash.length > 256 || /[\x00-\x1f\x7f]/.test(argumentsHash)) throw new TypeError();
-  return Object.freeze({ id, toolName, risk: risks[riskClass], label: states[status], status, expiresAt, argumentsHash, preview: JSON.stringify(fundRecord(preview), null, 2) });
+  return Object.freeze({ id, toolName, risk: risks[riskClass], label: states[status], status, expiresAt, argumentsHash,
+    creator, canDecide: creator !== null && creator === profile, preview: JSON.stringify(fundRecord(preview), null, 2) });
 }
 function draft(raw: unknown, limit: number, message: string, required = true) {
   if (typeof raw !== "string" || raw.includes("\0") || [...raw].length > limit || (required && !raw.trim())) throw new InvalidDraft(message);
@@ -31,6 +32,9 @@ function draft(raw: unknown, limit: number, message: string, required = true) {
 }
 export type Approval = ReturnType<typeof approval>;
 export type Decision = "confirm" | "reject";
+export class ApprovalDecisionForbidden extends InvalidDraft {
+  constructor() { super("Solo quien creó la propuesta puede decidir."); }
+}
 export function createAssistant(request: ScopedRequest, workspace: string) {
   const scope = uuid(workspace) ?? "";
   let reviewed: Approval | null = null;
@@ -53,11 +57,12 @@ export function createAssistant(request: ScopedRequest, workspace: string) {
     return { items: rows, nextCursor: hasNextPage ? nextCursor as string : null };
   }
   function write<T>(path: string, body: object, status: number, parse: (result: unknown) => T, confirmation?: PendingSubmissionExpired,
-    { events, expires }: { events?: true; expires?: string } = {}) {
+    { events, expires, creator }: { events?: true; expires?: string; creator?: string } = {}) {
     if (!scope) throw new InvalidDraft("No hay un espacio activo disponible.");
     // The journal receives a fingerprint, not a serialized body or a cached response.
     return request(scope, path, { method: "POST", body, successStatus: status, agentEvents: events,
       submit: (profile, operation, serverDate) => {
+        if (creator !== undefined && profile !== creator) throw new ApprovalDecisionForbidden();
         if (expires && serverDate !== null && Date.parse(expires) <= serverDate) throw new InvalidDraft("La propuesta ya venció.");
         return pendingSubmission(scope, profile, JSON.stringify(["POST", path, body]), async (key) => parse(await operation(key)), { serverDate, confirmation });
       },
@@ -82,17 +87,25 @@ export function createAssistant(request: ScopedRequest, workspace: string) {
       reviewed = null;
       const id = uuid(raw);
       if (!scope || !id) throw new InvalidDraft("Identificador de la propuesta no válido.");
-      return reviewed = approval(await request(scope, `${approvals}/${id}`, { successStatus: 200 }), id);
+      let profile: string | undefined;
+      const data = await request(scope, `${approvals}/${id}`, { successStatus: 200, onMembership: async (context) => {
+        if (context.active?.id === scope) profile = context.profileId;
+      } });
+      return reviewed = approval(data, id, profile);
     },
     async decide(row: Approval, decision: Decision, confirmation?: PendingSubmissionExpired) {
       if (row !== reviewed || row.status !== "pending" || (decision !== "confirm" && decision !== "reject")) throw new InvalidDraft("Revisa la propuesta antes de decidir.");
+      if (!row.canDecide || !row.creator) throw new ApprovalDecisionForbidden();
       try {
         return reviewed = await write(`${approvals}/${row.id}/${decision}`, { argumentsHash: row.argumentsHash }, 200, (input) => {
           const next = approval(input, row.id);
           if (next.argumentsHash !== row.argumentsHash || (decision === "reject" ? next.status !== "rejected" : !["approved", "consumed"].includes(next.status))) throw new TypeError();
           return next;
-        }, confirmation, { expires: row.expiresAt });
+        }, confirmation, { expires: row.expiresAt, creator: row.creator });
       } catch (error) {
+        if (error instanceof TransportError && error.kind === "http" && error.status === 403) {
+          reviewed = null; throw new ApprovalDecisionForbidden();
+        }
         if (error instanceof TransportError && error.status === 412) reviewed = null;
         throw error;
       }

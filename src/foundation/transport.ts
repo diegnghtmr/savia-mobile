@@ -69,12 +69,20 @@ async function withDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, m
 function safePath(path: string) {
   if (!path.startsWith("/") || path.startsWith("//") || /[\s\\#\x00-\x1f]/.test(path)) throw new TypeError("Invalid Savia API path");
 }
-// These contract routes are subject-scoped; callers still verify the active workspace before dispatch.
+// These contract routes do not take a workspace header, but still verify the active workspace before dispatch.
 const subjectRoute = /^\/v1\/(?:notifications(?:\?|$)|notifications\/[a-f\d-]{36}\/read$|me\/(?:notification-preferences|push-devices)$)/;
 function subjectAccessRoute(path: string, method = "GET") {
   if (method === "GET") return /^\/v1\/mcp\/grants(?:\?.*)?$/.test(path);
   if (method === "POST") return path === "/v1/mcp/grants" || path === "/v1/cli/device/approve";
   return method === "DELETE" && /^\/v1\/mcp\/grants\/[a-f\d-]{36}$/.test(path);
+}
+function workspaceRosterRoute(path: string, id: string | null, method = "GET") {
+  const prefix = `/v1/workspaces/${id}`;
+  if (!id || !path.startsWith(prefix)) return false;
+  const tail = path.slice(prefix.length);
+  if (method === "GET") return tail === "" || /^\/(?:members|invitations)(?:\?.*)?$/.test(tail);
+  if (method === "POST") return tail === "/invitations" || /^\/invitations\/[a-f\d-]{36}\/revoke$/.test(tail);
+  return (method === "PATCH" || method === "DELETE") && /^\/members\/[a-f\d-]{36}$/.test(tail);
 }
 function rejectRedirect(response: Pick<Response, "status" | "redirected">) {
   if (response.redirected || (response.status >= 300 && response.status < 400)) throw new TransportError("redirect");
@@ -138,7 +146,8 @@ export function createTransport({
     async requestInWorkspace(expected: unknown, path: string, options?: RequestInput & WorkspaceOptions) {
       safePath(path);
       const id = uuid(expected);
-      if (options?.subjectResource && !subjectRoute.test(path) && !subjectAccessRoute(path, options.method)) throw new TypeError("Invalid Savia subject resource");
+      if (options?.subjectResource && !subjectRoute.test(path) && !subjectAccessRoute(path, options.method) &&
+        !workspaceRosterRoute(path, id, options.method)) throw new TypeError("Invalid Savia subject resource");
       if (!id) throw new Error(workspaceUnavailable);
       return withBearer(async (token) => {
         const request = bind(token);
