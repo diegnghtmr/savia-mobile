@@ -4,6 +4,7 @@ import { splitFields, type DebtPayments } from "../foundation/debt-payments";
 import { debtStatuses, type Debt, type Debts } from "../foundation/debts";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { useVisibleApi } from "./use-visible-api";
 import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
@@ -91,7 +92,8 @@ function Detail({ api, id, back, pay }: { api: Debts; id: string; back: () => vo
   </AuthPanel>;
 }
 
-export function DebtsScreen({ api, payments, back }: { api: Debts; payments?: DebtPayments; back: () => void }) {
+export function DebtsScreen({ api, payments, back, nextView }: { api: Debts; payments?: DebtPayments; back: () => void; nextView?: () => { api: Debts; payments?: DebtPayments } }) {
+  const view = useVisibleApi({ api, payments }, nextView);
   const [paying, setPaying] = useState<Debt>();
   const needsRefresh = useRef(false);
   const [id, setId] = useState<string>(), [items, setItems] = useState<Debt[]>([]), [next, setNext] = useState<string | null>(null);
@@ -102,7 +104,7 @@ export function DebtsScreen({ api, payments, back }: { api: Debts; payments?: De
     setBusy(true); setError(false);
     if (!cursor) { setItems([]); setNext(null); seen.current.clear(); }
     try {
-      const page = await api.list(cursor ? { cursor } : {});
+      const page = await view.api().api.list(cursor ? { cursor } : {});
       if (ticket !== sequence.current) return;
       if (cursor && (page.items.some((row) => items.some((item) => item.id === row.id)) || (page.nextCursor && seen.current.has(page.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor);
@@ -111,11 +113,11 @@ export function DebtsScreen({ api, payments, back }: { api: Debts; payments?: De
     finally { if (ticket === sequence.current) setBusy(false); }
   }
   useEffect(() => { void load(); return () => { ++sequence.current; }; }, [api]);
-  if (paying && payments) return <PaymentForm debt={paying} payments={payments} back={() => setPaying(undefined)} saved={() => {
-    needsRefresh.current = true; setPaying(undefined);
+  if (paying && payments) return <PaymentForm debt={paying} payments={view.api().payments ?? payments} back={() => { view.move(); setPaying(undefined); }} saved={() => {
+    view.move(); needsRefresh.current = true; setPaying(undefined);
   }} />;
-  if (id) return <Detail key={id} api={api} id={id} pay={payments ? setPaying : undefined} back={() => {
-    setId(undefined);
+  if (id) return <Detail key={id} api={view.api().api} id={id} pay={payments ? (debt) => { view.move(); setPaying(debt); } : undefined} back={() => {
+    view.move(); setId(undefined);
     if (needsRefresh.current) { needsRefresh.current = false; void load(); }
   }} />;
   return <AuthPanel>
@@ -123,7 +125,7 @@ export function DebtsScreen({ api, payments, back }: { api: Debts; payments?: De
     {busy && <Copy>Cargando deudas…</Copy>}
     {error && <><Copy role="alert">No pudimos cargar las deudas.</Copy><AuthAction label="Reintentar" action={() => retry.current?.()} /></>}
     {!busy && !error && !items.length && <Copy>No hay deudas.</Copy>}
-    {items.map((debt) => <View key={debt.id} style={{ gap: 4 }}><AuthAction label={debt.name} action={() => setId(debt.id)} /><Terms debt={debt} /></View>)}
+    {items.map((debt) => <View key={debt.id} style={{ gap: 4 }}><AuthAction label={debt.name} action={() => { view.move(); setId(debt.id); }} /><Terms debt={debt} /></View>)}
     {next && !error && <AuthAction label="Cargar más" action={() => void load(next)} disabled={busy} />}
   </AuthPanel>;
 }

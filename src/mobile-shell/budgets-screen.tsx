@@ -5,6 +5,7 @@ import { methods, rollover, type BudgetDetail, type BudgetFilters, type Budgets 
 import { InvalidDraft } from "../foundation/identity-draft";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { useVisibleApi } from "./use-visible-api";
 import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
@@ -126,18 +127,19 @@ function Editor({ api, writes, edit, back, done }: { api: Budgets; writes: Budge
 const fields = [["from", "Desde (AAAA-MM-DD)"], ["to", "Hasta (AAAA-MM-DD)"], ["limit", "Resultados por página (1–200)"]] as const;
 type Page = Awaited<ReturnType<Budgets["list"]>>;
 const empty: Page = { items: [], nextCursor: null };
-export function BudgetsScreen({ api, writes, back }: { api: Budgets; writes?: BudgetWrites; back: () => void }) {
+export function BudgetsScreen({ api, writes, back, nextView }: { api: Budgets; writes?: BudgetWrites; back: () => void; nextView?: () => Budgets }) {
+  const view = useVisibleApi(api, nextView);
   const [id, setId] = useState<string>(), [edit, setEdit] = useState<Edit>();
   const [draft, setDraft] = useState<BudgetFilters>({ limit: "20" }), [applied, setApplied] = useState<BudgetFilters>({});
   const [page, setPage] = useState(empty), [busy, setBusy] = useState(true), [error, setError] = useState("");
   const sequence = useRef(0), seen = useRef(new Set<string>());
   const retry = useRef<() => void>(undefined);
-  async function load(filters: BudgetFilters, cursor?: string) {
+  async function load(filters: BudgetFilters, cursor?: string, reads = view.api()) {
     const ticket = ++sequence.current;
     setBusy(true); setError("");
     if (!cursor) { setPage(empty); seen.current.clear(); }
     try {
-      const result = await api.list({ ...filters, ...(cursor && { cursor }) });
+      const result = await reads.list({ ...filters, ...(cursor && { cursor }) });
       if (ticket !== sequence.current) return;
       if (cursor && (result.items.some(({ id }) => page.items.some((row) => row.id === id)) || (result.nextCursor && seen.current.has(result.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor);
@@ -149,19 +151,20 @@ export function BudgetsScreen({ api, writes, back }: { api: Budgets; writes?: Bu
     } finally { if (ticket === sequence.current) setBusy(false); }
   }
   useEffect(() => { void load({}); return () => { ++sequence.current; }; }, [api]);
-  if (edit && writes) return <Editor api={api} writes={writes} edit={edit} back={() => setEdit(undefined)} done={(result) => {
-    setEdit(undefined); setId(result); void load(applied);
+  if (edit && writes) return <Editor api={view.api()} writes={writes} edit={edit} back={() => { view.move(); setEdit(undefined); }} done={(result) => {
+    view.move(); setEdit(undefined); setId(result); void load(applied, undefined, api);
   }} />;
-  if (id) return <Detail key={id} api={api} id={id} edit={writes ? setEdit : undefined} back={() => setId(undefined)} />;
+  if (id) return <Detail key={id} api={view.api()} id={id} edit={writes ? (next) => { view.move(); setEdit(next); } : undefined}
+    back={() => { view.move(); setId(undefined); }} />;
   return <AuthPanel>
     <Copy role="header">Presupuestos</Copy><AuthAction label="Volver al resumen" action={back} />
-    {writes && <AuthAction label="Nuevo presupuesto" action={() => setEdit({ mode: "create" })} />}
+    {writes && <AuthAction label="Nuevo presupuesto" action={() => { view.move(); setEdit({ mode: "create" }); }} />}
     {fields.map(([key, label]) => <Field key={key} label={label} value={draft[key] ?? ""} change={(value) => setDraft((old) => ({ ...old, [key]: value }))} disabled={busy} />)}
     <AuthAction label="Filtrar presupuestos" action={() => void load(Object.fromEntries(Object.entries(draft).filter(([key, value]) => key === "limit" || value !== "")))} disabled={busy} />
     {busy && <Copy>Cargando presupuestos…</Copy>}
     {error && <><Copy role="alert">{error}</Copy>{retry.current && <AuthAction label="Reintentar" action={retry.current} />}</>}
     {!busy && !error && !page.items.length && <Copy>No hay presupuestos para estos filtros.</Copy>}
-    {page.items.map((row) => <View key={row.id}><AuthAction label={row.name} action={() => setId(row.id)} />
+    {page.items.map((row) => <View key={row.id}><AuthAction label={row.name} action={() => { view.move(); setId(row.id); }} />
       <Copy>{row.periodStart} – {row.periodEnd} · {methods[row.method]}</Copy>
       <AllocationSummary rows={row.allocations} /></View>)}
     {page.nextCursor && !error && <AuthAction label="Cargar más" action={() => void load(applied, page.nextCursor ?? undefined)} disabled={busy} />}

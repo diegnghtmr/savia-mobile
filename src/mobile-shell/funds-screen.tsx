@@ -4,6 +4,7 @@ import type { FundWrites } from "../foundation/fund-writes";
 import { fundStatuses, type Fund, type Funds } from "../foundation/funds";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { useVisibleApi } from "./use-visible-api";
 import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
@@ -81,7 +82,8 @@ function Detail({ api, id, back, contribute }: { api: Funds; id: string; back: (
   </AuthPanel>;
 }
 
-export function FundsScreen({ api, writes, back }: { api: Funds; writes?: FundWrites; back: () => void }) {
+export function FundsScreen({ api, writes, back, nextView }: { api: Funds; writes?: FundWrites; back: () => void; nextView?: () => { api: Funds; writes?: FundWrites } }) {
+  const view = useVisibleApi({ api, writes }, nextView);
   const [form, setForm] = useState<FormMode>();
   const needsRefresh = useRef(false);
   const [id, setId] = useState<string>(), [items, setItems] = useState<Fund[]>([]), [next, setNext] = useState<string | null>(null);
@@ -92,7 +94,7 @@ export function FundsScreen({ api, writes, back }: { api: Funds; writes?: FundWr
     setBusy(true); setError(false);
     if (!cursor) { setItems([]); setNext(null); seen.current.clear(); }
     try {
-      const page = await api.list(cursor ? { cursor } : {});
+      const page = await view.api().api.list(cursor ? { cursor } : {});
       if (ticket !== sequence.current) return;
       if (cursor && (page.items.some((row) => items.some(({ id }) => id === row.id)) || (page.nextCursor && seen.current.has(page.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor);
@@ -102,20 +104,20 @@ export function FundsScreen({ api, writes, back }: { api: Funds; writes?: FundWr
     } finally { if (ticket === sequence.current) setBusy(false); }
   }
   useEffect(() => { void load(); return () => { ++sequence.current; }; }, [api]);
-  if (form && writes) return <FundForm mode={form} writes={writes} back={() => setForm(undefined)} saved={(fundId) => {
-    needsRefresh.current = true; setId(fundId); setForm(undefined);
+  if (form && writes) return <FundForm mode={form} writes={view.api().writes ?? writes} back={() => { view.move(); setForm(undefined); }} saved={(fundId) => {
+    view.move(); needsRefresh.current = true; setId(fundId); setForm(undefined);
   }} />;
-  if (id) return <Detail key={id} api={api} id={id} back={() => {
-    setId(undefined);
+  if (id) return <Detail key={id} api={view.api().api} id={id} back={() => {
+    view.move(); setId(undefined);
     if (needsRefresh.current) { needsRefresh.current = false; void load(); }
-  }} contribute={writes ? (fund) => setForm({ kind: "contribute", fund }) : undefined} />;
+  }} contribute={writes ? (fund) => { view.move(); setForm({ kind: "contribute", fund }); } : undefined} />;
   return <AuthPanel>
     <Copy role="header">Fondos</Copy><AuthAction label="Volver al resumen" action={back} />
-    {writes && <AuthAction label="Nuevo fondo" action={() => setForm({ kind: "create" })} />}
+    {writes && <AuthAction label="Nuevo fondo" action={() => { view.move(); setForm({ kind: "create" }); }} />}
     {busy && <Copy>Cargando fondos…</Copy>}
     {error && <><Copy role="alert">No pudimos cargar los fondos.</Copy><AuthAction label="Reintentar" action={() => retry.current?.()} /></>}
     {!busy && !error && !items.length && <Copy>No hay fondos.</Copy>}
-    {items.map((fund) => <View key={fund.id} style={{ gap: 4 }}><AuthAction label={fund.name} action={() => setId(fund.id)} />
+    {items.map((fund) => <View key={fund.id} style={{ gap: 4 }}><AuthAction label={fund.name} action={() => { view.move(); setId(fund.id); }} />
       <Copy>{fundStatuses[fund.status]}</Copy><Totals fund={fund} /></View>)}
     {next && !error && <AuthAction label="Cargar más" action={() => void load(next)} disabled={busy} />}
   </AuthPanel>;

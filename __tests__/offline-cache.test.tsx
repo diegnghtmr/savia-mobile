@@ -78,8 +78,8 @@ test("cold offline restart reads only saved accounts, movements, budgets, funds,
   expect([...saved.values()].filter((value) => /^[a-f0-9]{64}$/.test(value))).toHaveLength(1);
 });
 
-test("does not persist import job responses for offline reuse", async () => {
-  const f = setup(), local = f.reopen(), show = jest.fn(), path = `/v1/import-jobs/${second.id}`;
+test.each(["import-jobs", "receipts"])("does not persist %s responses for offline reuse", async (resource) => {
+  const f = setup(), local = f.reopen(), show = jest.fn(), path = `/v1/${resource}/${second.id}`;
   await local.identity.select(first.id);
   const scoped = local.scope(profile, first.id, f.api.requestInWorkspace, show);
   await expect(scoped(first.id, path)).resolves.toMatchObject({ path });
@@ -280,4 +280,29 @@ test("a delayed negative membership response from before regrant cannot revoke f
   await expect(old).resolves.toMatchObject({ message: "Este espacio ya no está disponible." });
   f.setOnline(false);
   await expect(scoped(f.reopen())(first.id, accounts)).resolves.toMatchObject({ workspace: first.id });
+});
+
+// Reviewer regression (verify mwrd7bv6). Append to __tests__/offline-cache.test.tsx.
+test("review: a stale denial cannot purge data from a newer positive verification when the removal was not observed locally", async () => {
+  const f = setup(), oldProcess = f.reopen();
+  await oldProcess.identity.select(first.id);
+  const seen = deferred<void>(), release = deferred<void>(), send = f.send.getMockImplementation()!;
+  let hold = true, version = "initial";
+  f.send.mockImplementation(async (url, init) => {
+    const path = new URL(url).pathname, response = await send(url, init);
+    if (path === "/v1/workspaces" && hold) { hold = false; seen.release(); await release.result; }
+    return path === "/v1/accounts" && response.ok ? Response.json({ version }) : response;
+  });
+  const scope = (p: ReturnType<typeof f.reopen>) => p.scope(profile, first.id, f.api.requestInWorkspace, jest.fn());
+  f.removeFirst();
+  const stale = scope(oldProcess)(first.id, accounts).catch((error) => error);
+  await seen.result;
+  try {
+    f.rejoinFirst(); version = "fresh";
+    const reopened = f.reopen(); await reopened.identity.select(first.id);
+    await expect(scope(reopened)(first.id, accounts)).resolves.toEqual({ version: "fresh" });
+  } finally { release.release(); }
+  await expect(stale).resolves.toMatchObject({ message: "Este espacio ya no está disponible." });
+  f.setOnline(false);
+  await expect(scope(f.reopen())(first.id, accounts)).resolves.toEqual({ version: "fresh" });
 });

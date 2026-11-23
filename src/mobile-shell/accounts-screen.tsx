@@ -5,6 +5,7 @@ import { InvalidDraft } from "../foundation/identity-draft";
 import { TransportError } from "../foundation/transport";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { useVisibleApi } from "./use-visible-api";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
   const colors = paletteFor(useColorScheme());
@@ -168,14 +169,15 @@ function Create({ api, open, back }: { api: Accounts; open: (id: string) => void
   </>;
 }
 
-export function AccountsScreen({ api, back }: { api: Accounts; back: () => void }) {
-  const [panel, show] = useState<"list" | "create" | { id: string }>("list");
-  const [status, change] = useState<Filter>(undefined);
+export function AccountsScreen({ api, back, nextView }: { api: Accounts; back: () => void; nextView?: () => Accounts }) {
+  const [panel, setPanel] = useState<"list" | "create" | { id: string }>("list");
+  const [status, change] = useState<Filter>(undefined), view = useVisibleApi(api, nextView);
+  const show = (next: typeof panel) => { view.move(); setPanel(next); };
   const open = (id: string) => show({ id });
   return <AuthPanel>
     {panel === "list" ? <>
       <Copy role="header">Cuentas</Copy><AuthAction label="Volver al resumen" action={back} />
-      <AuthAction label="Nueva cuenta" action={() => show("create")} /><List key={status ?? "all"} api={api} status={status} change={change} open={open} />
-    </> : panel === "create" ? <Create api={api} open={open} back={() => show("list")} /> : <Detail key={panel.id} api={api} id={panel.id} back={() => show("list")} />}
+      <AuthAction label="Nueva cuenta" action={() => show("create")} /><List key={status ?? "all"} api={view.api()} status={status} change={(next) => { if (status !== next) { view.move(); change(next); } }} open={open} />
+    </> : panel === "create" ? <Create api={view.api()} open={open} back={() => show("list")} /> : <Detail key={panel.id} api={view.api()} id={panel.id} back={() => show("list")} />}
   </AuthPanel>;
 }

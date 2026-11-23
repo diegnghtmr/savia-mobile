@@ -83,3 +83,24 @@ test("reviews destination and mapping before explicitly committing an analyzed i
   expect(await screen.findByText("Importación completada")).toBeTruthy();
   expect(f.posts).toHaveLength(1); expect(f.posts[0].body).toEqual(draft); expect(f.pending()).toEqual([]);
 });
+
+// Reviewer regression (verify mwrd7bv6). Append to __tests__/import-commit.test.tsx.
+test("review: missing membership Date preserves the pending import until an explicit, single-use confirmation", async () => {
+  const f = setup(), writer = f.reopen(); await writer.loadAccounts();
+  f.lose(); await expect(writer.commit(job, draft, true)).rejects.toThrow(/Necesitas conexión/);
+  const original = f.send.getMockImplementation()!, previous = f.pending();
+  const { key } = f.posts[0];
+  f.send.mockImplementation(async (url, init) => {
+    const reply = await original(url, init);
+    return new URL(url).pathname === "/v1/workspaces" ? { ...reply, headers: new Headers() } : reply;
+  });
+  const reopened = f.reopen(); await reopened.loadAccounts();
+  const approval = await reopened.commit(job, draft, true).catch((error) => error);
+  expect(approval.constructor.name).toBe("PendingSubmissionExpired");
+  expect(approval.message).toBe("Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.");
+  expect(f.pending()).toEqual(previous); expect(f.posts).toHaveLength(1);
+  f.lose(); await expect(reopened.commit(job, draft, true, approval)).rejects.toThrow(/Necesitas conexión/);
+  expect(f.posts[1]).toMatchObject({ key: expect.not.stringMatching(key), body: f.posts[0].body });
+  await expect(reopened.commit(job, draft, true, approval)).rejects.toThrow("Pending submission changed");
+  expect(f.posts).toHaveLength(2); expect(f.pending()).toHaveLength(1);
+});

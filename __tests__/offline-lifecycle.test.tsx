@@ -1,6 +1,6 @@
 // Reviewer regression (verify mwr70vb0). New file __tests__/offline-lifecycle.test.tsx.
 import { fireEvent, render, screen } from "@testing-library/react-native";
-import { fetch as expoFetch } from "expo/fetch";
+import { fetch as nativeFetch } from "expo/fetch";
 import * as SecureStore from "expo-secure-store";
 import { AppState } from "react-native";
 import { offlineStore } from "../src/foundation/offline-db";
@@ -18,6 +18,7 @@ jest.mock("expo-crypto", () => ({
   getRandomBytesAsync: async (size: number) => require("node:crypto").randomBytes(size),
 }));
 
+const expoFetch: (...args: Parameters<typeof nativeFetch>) => Promise<Pick<Awaited<ReturnType<typeof nativeFetch>>, "status" | "ok" | "headers" | "redirected" | "json">> = nativeFetch;
 const uid = (n: number) => "abca0000-0000-4000-8000-00000000000" + n;
 const [profile, workspace, account, receipt] = [1, 2, 3, 4].map(uid);
 const source = "https://api.invalid";
@@ -213,4 +214,40 @@ test("leaving a slow fresh report cannot clear the visible mixed report's offlin
     expect(screen.getByText("Hogar: 0,12 COP · 100 %")).toBeTruthy();
     expect(screen.getByRole("alert", alert)).toBeTruthy();
   } finally { await f.close(); }
+});
+
+// Reviewer regression (verify mwrd7bv6). Append to __tests__/offline-lifecycle.test.tsx.
+test("review: leaving account detail prevents its late cache fallback from changing the visible list banner", async () => {
+  const f = await setup();
+  let unpause!: () => void;
+  const pause = new Promise<void>((resolve) => { unpause = resolve; });
+  try {
+    const traffic = jest.mocked(expoFetch), send = traffic.getMockImplementation()!;
+    let holding = false, staleBalance = false, reached!: () => void, balanceTried!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    const completed = new Promise<void>((resolve) => { balanceTried = resolve; });
+    traffic.mockImplementation(async (url, init) => {
+      const { pathname } = new URL(String(url));
+      if (pathname === `/v1/accounts/${account}`) {
+        if (holding) { reached(); await pause; staleBalance = true; throw new Error("detail offline"); }
+        const reply = await send(url, init);
+        return { ...reply, json: async () => ({ id: account, name: "Caja", type: "cash", status: "active", currency: "COP" }) };
+      }
+      if (pathname.endsWith("/balance")) {
+        if (staleBalance) { balanceTried(); throw new Error("balance offline"); }
+        const reply = await send(url, init);
+        const amount = { amountMinor: "120", currency: "COP" };
+        return { ...reply, json: async () => ({ accountId: account, nativeBalance: amount, asOf: "2026-11-01T00:00:00Z",
+          baseCurrencyEquivalent: { original: amount, converted: amount, rate: "1", rateDate: "2026-11-01", rateSource: "fixture" } }) };
+      }
+      return send(url, init);
+    });
+    await press("Cuentas"); await press("Caja"); await screen.findByText("Saldo confirmado: 1,20 COP");
+    await press("Volver a cuentas"); holding = true;
+    await press("Caja"); await waiting;
+    await press("Volver a cuentas"); await screen.findByRole("button", { name: "Caja" });
+    await act(async () => { unpause(); await completed; });
+    expect(screen.getByRole("button", { name: "Caja" })).toBeTruthy();
+    expect(screen.queryByRole("alert", { name: /Sin conexión — datos guardados el/ })).toBeNull();
+  } finally { unpause(); await f.close(); }
 });

@@ -70,3 +70,15 @@ test("does not render backend problem detail or upload in a revoked workspace", 
   await expect(f.api.upload(f.file)).rejects.toThrow("Este espacio ya no está disponible.");
   expect(f.send.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
 });
+
+// Reviewer regression (verify mwrd7bv6). Append to __tests__/import-upload.test.tsx.
+test("review: exactly 5 MiB is admitted, the next byte is rejected before session", async () => {
+  const request = jest.fn().mockResolvedValue({ id: jobId, fileName, status: "uploaded", createdAt: "2026-11-01T00:00:00Z" });
+  const api = createImports(request, workspace), limit = 5 * 1024 * 1024;
+  await expect(api.upload({ name: fileName, blob: new Blob([new Uint8Array(limit + 1)], { type: mime }) }))
+    .rejects.toThrow("Elige un archivo CSV de hasta 5 MiB.");
+  expect(request).not.toHaveBeenCalled();
+  await expect(api.upload({ name: fileName, blob: new Blob([new Uint8Array(limit)], { type: mime }) })).resolves.toMatchObject({ id: jobId });
+  expect((request.mock.calls[0][2].multipart.get("file") as File).size).toBe(limit);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});

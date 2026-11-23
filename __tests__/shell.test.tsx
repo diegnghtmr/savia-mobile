@@ -1,9 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react-native";
 import { StyleSheet, useColorScheme, useWindowDimensions } from "react-native";
-import { HomeScreen } from "../src/app/index";
+import { HomeScreen, SaviaMobile } from "../src/app/index";
 import NotFoundScreen from "../src/app/+not-found";
+import { InvalidDraft } from "../src/foundation/identity-draft";
+import { createInbox } from "../src/foundation/notification-inbox";
+import { createNotificationPreferences } from "../src/foundation/notification-preferences";
 
-jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn() }));
+jest.mock("../src/foundation/accounts", () => ({ createAccounts: jest.fn(() => ({})) }));
 jest.mock("../src/foundation/analytics", () => ({ createAnalytics: jest.fn() }));
 jest.mock("../src/foundation/auth", () => ({ getAuth: jest.fn() }));
 jest.mock("../src/foundation/budgets", () => ({ createBudgets: jest.fn() }));
@@ -11,16 +14,26 @@ jest.mock("../src/foundation/budget-writes", () => ({ createBudgetWrites: jest.f
 jest.mock("../src/foundation/debt-payments", () => ({ createDebtPayments: jest.fn() }));
 jest.mock("../src/foundation/debts", () => ({ createDebts: jest.fn() }));
 jest.mock("../src/foundation/forecasts", () => ({ createForecasts: jest.fn() }));
+jest.mock("../src/foundation/receipts", () => ({ createReceipts: jest.fn(() => ({})) }));
+jest.mock("../src/foundation/notification-inbox", () => ({ createInbox: jest.fn() }));
+jest.mock("../src/foundation/notification-preferences", () => ({ createNotificationPreferences: jest.fn() }));
+jest.mock("../src/foundation/receipt-confirmations", () => ({ createReceiptConfirmations: jest.fn() }));
 jest.mock("../src/foundation/scenarios", () => ({ createScenarios: jest.fn() }));
 jest.mock("../src/foundation/funds", () => ({ createFunds: jest.fn() }));
 jest.mock("../src/foundation/fund-writes", () => ({ createFundWrites: jest.fn() }));
 jest.mock("../src/foundation/imports", () => ({ createImports: jest.fn() }));
 jest.mock("../src/foundation/import-commits", () => ({ createImportCommits: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
-jest.mock("../src/foundation/offline-cache", () => ({ createOffline: jest.fn(() => ({})) }));
-jest.mock("../src/foundation/transactions", () => ({ createTransactions: jest.fn() }));
+jest.mock("../src/foundation/offline-cache", () => ({ createOffline: jest.fn(() => {
+  const active = { id: "abca0000-0000-4000-8000-000000000001", name: "Casa" };
+  return { identity: { bootstrap: async () => ({ profileId: "abca0000-0000-4000-8000-000000000002", active, items: [active] }) },
+    scope: jest.fn(), outbox: () => ({ list: async () => [], subscribe: () => () => {}, sync: async () => {} }) };
+}) }));
+jest.mock("../src/foundation/transactions", () => ({ createTransactions: jest.fn(() => ({})) }));
 jest.mock("../src/foundation/transfers", () => ({ createTransfers: jest.fn() }));
-jest.mock("../src/foundation/transport", () => ({ createTransport: jest.fn() }));
+jest.mock("expo/fetch", () => ({ fetch: jest.fn() }));
+jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: jest.fn(), deleteItemAsync: jest.fn() }));
+jest.mock("../src/foundation/transport", () => ({ ...jest.requireActual("../src/foundation/transport"), createTransport: jest.fn() }));
 
 jest.mock("react-native/Libraries/Utilities/useColorScheme", () => ({ default: jest.fn(() => "light") }));
 jest.mock("react-native/Libraries/Utilities/useWindowDimensions", () => ({ default: jest.fn(() => ({ fontScale: 1, height: 640, scale: 1, width: 320 })) }));
@@ -95,6 +108,37 @@ test("opens statement imports from the workspace home", async () => {
   await render(<HomeScreen openImports={open} />);
   await fireEvent.press(screen.getByRole("button", { name: "Importar extractos" }));
   expect(open).toHaveBeenCalledTimes(1);
+});
+
+test("opens receipts from the workspace home", async () => {
+  const open = jest.fn(); await render(<HomeScreen openReceipts={open} />);
+  await fireEvent.press(screen.getByRole("button", { name: "Recibos" }));
+  expect(open).toHaveBeenCalledTimes(1);
+});
+
+test("navigates from the workspace to the inbox and settings and passes the optional push source on demand", async () => {
+  const list = jest.fn().mockResolvedValue({ items: [], nextCursor: null });
+  const load = jest.fn().mockRejectedValue(new InvalidDraft("Preferencias de notificaciones no disponibles."));
+  const register = jest.fn().mockRejectedValue(new InvalidDraft("Registro de notificaciones push no disponible."));
+  const registration = { expoPushToken: "ExpoPushToken[fixture]", platform: "ios" as const, appVersion: "1.0.0" };
+  const pushTokenSource = jest.fn().mockResolvedValue(registration);
+  jest.mocked(createInbox).mockReturnValue({ list, mark: jest.fn() });
+  jest.mocked(createNotificationPreferences).mockReturnValue({ load, save: jest.fn(), register });
+  await render(<SaviaMobile pushTokenSource={pushTokenSource} />);
+  const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
+  await press("Notificaciones");
+  expect(await screen.findByText("No hay notificaciones.")).toBeTruthy();
+  expect(list).toHaveBeenCalledTimes(1); expect(load).not.toHaveBeenCalled();
+  await press("Preferencias de notificaciones");
+  expect(await screen.findByText("Preferencias de notificaciones no disponibles.")).toBeTruthy();
+  expect(pushTokenSource).not.toHaveBeenCalled();
+  await press("Registrar este dispositivo");
+  expect(await screen.findByText("Registro de notificaciones push no disponible.")).toBeTruthy();
+  expect(pushTokenSource).toHaveBeenCalledTimes(1); expect(register).toHaveBeenCalledWith(registration);
+  await press("Volver a notificaciones");
+  expect(await screen.findByText("No hay notificaciones.")).toBeTruthy();
+  await press("Volver al resumen");
+  expect(await screen.findByText("Tu dinero, con calma")).toBeTruthy();
 });
 
 test("exposes semantic heading, order, and 44px target", async () => {

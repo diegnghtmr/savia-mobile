@@ -42,7 +42,7 @@ const cleanText = (raw: unknown, max: number) => {
   if (typeof raw !== "string" || raw.includes("\0") || [...raw.trim()].length > max) throw new TypeError();
   return raw.trim();
 };
-function writeBody(input: unknown, currencies?: Map<string, string>) {
+function writeBody(input: unknown, currencies?: ReadonlyMap<string, string>) {
   try {
     const draft = object(input), keys = Object.keys(draft);
     const allowed = currencies ? [...metadata, "type", "accountId", "amount", "status"] : metadata;
@@ -73,6 +73,8 @@ function writeBody(input: unknown, currencies?: Map<string, string>) {
     return body;
   } catch { throw invalidMovement(); }
 }
+
+export const createMovementBody = (input: unknown, currencies: ReadonlyMap<string, string>) => writeBody(input, currencies);
 
 function queryFor(input: unknown) {
   try {
@@ -161,7 +163,7 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
       return { accounts: new Map([...currencies].map(([id, currency]) => [id, `${accounts.get(id)} (${currency})`])), categories, payees, tags };
     },
     async create(input: unknown, confirmation?: PendingSubmissionExpired, form?: object) {
-      return write("POST", endpoint, writeBody(input, accountCurrencies), confirmation, undefined, undefined, form);
+      return write("POST", endpoint, createMovementBody(input, accountCurrencies), confirmation, undefined, undefined, form);
     },
     async update(raw: unknown, etag: unknown, input: unknown, confirmation?: PendingSubmissionExpired) {
       const id = uuid(raw);

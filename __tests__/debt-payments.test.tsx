@@ -187,3 +187,29 @@ test("finds a legacy full-principal split even when the reopened form leaves it 
   await expect(writer.pay(debt, "KWD", { ...draft, totalAmount: "90,123" })).rejects.toThrow(/Puede que este movimiento/);
   expect(f.posts).toHaveLength(1); expect(f.commits.size).toBe(1); expect(f.pending()).toHaveLength(1);
 });
+
+// Reviewer regression (verify mwrd7bv6). Append to __tests__/debt-payments.test.tsx.
+import { PendingSubmissionExpired } from "../src/foundation/pending-expiry";
+
+test("review: an expired upgrade journal requires a single explicit retry with a fresh canonical key", async () => {
+  const f = setup(), writer = f.connect(); await writer.loadAccounts();
+  const input = { ...draft, totalAmount: "15,125" }, oldKey = id(9);
+  const legacy = (amountMinor: string) => ({ amountMinor, currency: "KWD" });
+  const oldBody = { accountId: account, totalAmount: legacy("15125"), principalAmount: legacy("15125"),
+    feeAmount: legacy("0"), occurredAt: `${draft.date}T00:00:00.000Z` };
+  const slot = await pendingSlot(workspace, profile, JSON.stringify(["POST", path, oldBody]));
+  const saved = JSON.stringify({ key: oldKey, createdAt: start, clock: "server" });
+  await secure.setItemAsync(slot, saved);
+  f.advance(23 * hour);
+  const approval = await writer.pay(debt, "KWD", input).catch((error) => error);
+  expect({ kind: approval?.constructor?.name, posts: f.posts.length, pending: f.pending() }).toEqual({
+    kind: "PendingSubmissionExpired", posts: 0, pending: [[slot, saved]],
+  });
+  expect(approval).toBeInstanceOf(PendingSubmissionExpired);
+  await expect(writer.pay(debt, "KWD", input, approval)).resolves.toBe(receipt);
+  expect(f.posts).toEqual([{ key: expect.not.stringMatching(oldKey), body: { accountId: account,
+    totalAmount: legacy("15125"), occurredAt: oldBody.occurredAt }, persisted: true, match: null }]);
+  expect(f.pending()).toEqual([]);
+  await expect(writer.pay(debt, "KWD", input, approval)).rejects.toThrow("Pending submission changed");
+  expect(f.commits.size).toBe(1);
+});

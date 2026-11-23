@@ -28,8 +28,9 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
     };
     const row = await db.getFirstAsync<{ snapshot: string }>("SELECT snapshot FROM membership WHERE principal = ?", owner);
     const before = row ? JSON.parse(row.snapshot) as WorkspaceContext : null;
-    const fenced = started === undefined ? [] : await db.getAllAsync<{ profile: string; workspace: string }>(
-      "SELECT profile, workspace FROM membership_events WHERE principal = ? AND sequence > ?", owner, started);
+    const known = started === undefined ? [] : await db.getAllAsync<{ profile: string; workspace: string; sequence: number }>(
+      "SELECT profile, workspace, sequence FROM membership_versions WHERE principal = ?", owner);
+    const fenced = known.filter(({ sequence }) => sequence > started!);
     const protectedScopes = fenced.filter((scope) => scope.profile === fresh?.profileId || scope.profile === before?.profileId);
     if (protectedScopes.some(({ workspace }) => expected === undefined || workspace === expected)) throw new Error(workspaceUnavailable);
     // An old response for an unaffected workspace cannot change the membership of a fenced workspace.
@@ -47,10 +48,21 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
       for (const { profile, workspace } of scopes) await db.runAsync("INSERT OR REPLACE INTO membership_events VALUES (?, ?, ?, ?)", owner, profile, workspace, sequence);
       return sequence;
     };
-    // Fence already-started requests and publish revocation before fallible deletion.
-    if (lost.length) await atomic(db, async () => {
-      await recordEvents(lost);
-      if (before) await publish({ ...before, items: stillAllowed, active: stillAllowed.find(({ id }) => id === before.active?.id) ?? null });
+    // A full membership response also verifies absences for previously known scopes.
+    const verified = new Map<string, { profile: string; workspace: string }>();
+    for (const scope of [...known.filter(({ profile }) => profile === fresh?.profileId || profile === before?.profileId),
+      ...lost, ...(fresh?.items.map(({ id }) => ({ profile: fresh.profileId, workspace: id })) ?? [])]) {
+      verified.set(`${scope.profile}:${scope.workspace}`, scope);
+    }
+    if (verified.size || lost.length) await atomic(db, async () => {
+      if (started !== undefined) for (const { profile, workspace } of verified.values()) await db.runAsync(
+        `INSERT INTO membership_versions VALUES (?, ?, ?, ?) ON CONFLICT(principal, profile, workspace)
+         DO UPDATE SET sequence = excluded.sequence WHERE excluded.sequence > membership_versions.sequence`, owner, profile, workspace, started);
+      // Publish revocation and fence already-authorized data before fallible deletion.
+      if (lost.length) {
+        await recordEvents(lost);
+        if (before) await publish({ ...before, items: stillAllowed, active: stillAllowed.find(({ id }) => id === before.active?.id) ?? null });
+      }
     });
     const stale = await db.getAllAsync<{ profile: string; workspace: string }>(
       `SELECT profile, workspace FROM cache WHERE principal = ? UNION SELECT profile, workspace FROM outbox WHERE principal = ?`, owner, owner);

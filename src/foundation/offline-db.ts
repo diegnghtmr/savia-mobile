@@ -32,6 +32,8 @@ const migrations = [
    CREATE TABLE revocations (principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL, sequence INTEGER NOT NULL,
      PRIMARY KEY (principal, profile, workspace));`,
   `ALTER TABLE revocations RENAME TO membership_events;`,
+  `CREATE TABLE membership_versions (principal TEXT NOT NULL, profile TEXT NOT NULL, workspace TEXT NOT NULL, sequence INTEGER NOT NULL,
+     PRIMARY KEY (principal, profile, workspace));`,
 ];
 
 export class OfflineStorageUnavailable extends Error {}

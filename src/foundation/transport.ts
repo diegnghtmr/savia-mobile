@@ -11,6 +11,7 @@ type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
   expectedProfile?: string;
+  subjectResource?: true;
   form?: object;
   onMembership?: (context: WorkspaceContext) => Promise<void>;
   submit?: (profileId: string, operation: (key: string, dispatch?: { body: unknown }) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
@@ -46,6 +47,8 @@ async function withDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, m
 function safePath(path: string) {
   if (!path.startsWith("/") || path.startsWith("//") || /[\s\\#\x00-\x1f]/.test(path)) throw new TypeError("Invalid Savia API path");
 }
+// These contract routes are subject-scoped; callers still verify the active workspace before dispatch.
+const subjectRoute = /^\/v1\/(?:notifications(?:\?|$)|notifications\/[a-f\d-]{36}\/read$|me\/(?:notification-preferences|push-devices)$)/;
 function rejectRedirect(response: Pick<Response, "status" | "redirected">) {
   if (response.redirected || (response.status >= 300 && response.status < 400)) throw new TransportError("redirect");
 }
@@ -62,7 +65,7 @@ export function createTransport({
     if (!session) throw new TransportError("http", 401);
     return operation(session.accessToken);
   }
-  async function execute(token: string, path: string, { method = "GET", body, multipart, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id: string }, onDate?: (date: number | null) => void) {
+  async function execute(token: string, path: string, { method = "GET", body, multipart, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id?: string }, onDate?: (date: number | null) => void) {
     safePath(path);
     const headers: Record<string, string> = { Accept: "application/json, application/problem+json" };
     headers.Authorization = ["Bearer", token].join(" ");
@@ -71,7 +74,7 @@ export function createTransport({
     if (!multipart && payload !== undefined) headers["Content-Type"] = "application/json";
     if (idempotencyKey !== undefined) headers["Idempotency-Key"] = idempotencyKey;
     if (workspace) {
-      headers["X-Workspace-Id"] = workspace.id;
+      if (workspace.id) headers["X-Workspace-Id"] = workspace.id;
       if (workspace.ifMatch !== undefined) headers["If-Match"] = workspace.ifMatch;
     }
     return withDeadline(async (signal) => {
@@ -80,7 +83,8 @@ export function createTransport({
       if (response.ok) {
         const expected = typeof successStatus === "number" ? [successStatus] : successStatus;
         if (expected && !expected.includes(response.status)) throw new TransportError("protocol", response.status);
-        const decoded: unknown = await response.json().catch(() => { throw new TransportError("protocol", response.status); });
+        const decoded: unknown = response.status === 204 && expected?.includes(204) ? undefined
+          : await response.json().catch(() => { throw new TransportError("protocol", response.status); });
         if (onDate) {
           const header = response.headers.get("date");
           const time = header === null ? NaN : Date.parse(header);
@@ -105,6 +109,7 @@ export function createTransport({
     async requestInWorkspace(expected: unknown, path: string, options?: RequestInput & WorkspaceOptions) {
       safePath(path);
       const id = uuid(expected);
+      if (options?.subjectResource && !subjectRoute.test(path)) throw new TypeError("Invalid Savia subject resource");
       if (!id) throw new Error(workspaceUnavailable);
       return withBearer(async (token) => {
         const request = bind(token);
@@ -116,7 +121,7 @@ export function createTransport({
         const context = await readWorkspaceContext(membership, profileId);
         await options?.onMembership?.(context);
         if (context.active?.id !== id) throw new Error(workspaceUnavailable);
-        const scope = { id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
+        const scope = { id: options?.subjectResource ? undefined : id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
         return options?.submit
           ? options.submit(profileId, (idempotencyKey, dispatch) => execute(token, path, { ...options, ...dispatch, idempotencyKey }, scope), serverDate)
           : execute(token, path, options, scope);

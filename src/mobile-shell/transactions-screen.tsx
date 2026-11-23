@@ -4,6 +4,7 @@ import { InvalidDraft } from "../foundation/identity-draft";
 import { type Filters, type LedgerDraft, type Transactions, statuses, types } from "../foundation/transactions";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { useVisibleApi } from "./use-visible-api";
 import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
 function Copy({ children, role }: { children: ReactNode; role?: "header" | "alert" }) {
@@ -120,7 +121,8 @@ function Detail({ api, id, back, changed }: { api: Transactions; id: string; bac
   </>;
 }
 
-export function TransactionsScreen({ api, back, startCreating = false }: { api: Transactions; back: () => void; startCreating?: boolean }) {
+export function TransactionsScreen({ api, back, startCreating = false, nextView }: { api: Transactions; back: () => void; startCreating?: boolean; nextView?: () => Transactions }) {
+  const view = useVisibleApi(api, nextView);
   const colors = paletteFor(useColorScheme());
   const [showFilters, toggleFilters] = useState(false);
   const [picker, setPicker] = useState<Selection>();
@@ -128,7 +130,8 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
   const [draft, setDraft] = useState<Filters>({ limit: "20" });
   const [applied, setApplied] = useState<Filters>({});
   const [visible, setVisible] = useState<string>();
-  const [creating, create] = useState(startCreating);
+  const [creating, setCreating] = useState(startCreating);
+  const create = (next: boolean) => { view.move(); setCreating(next); };
   const write = usePendingWrite(undefined, () => create(false));
   const changed = useRef(false);
   const [page, setPage] = useState(emptyPage);
@@ -141,7 +144,7 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     setBusy(true); setError("");
     if (!cursor) setPage(emptyPage);
     try {
-      const result = await api.list({ ...filters, ...(cursor && { cursor }) });
+      const result = await view.api().list({ ...filters, ...(cursor && { cursor }) });
       if (sequence.current !== operation) return;
       if (cursor && (result.items.some(({ id }) => page.items.some((row) => row.id === id)) || (result.nextCursor && seen.current.has(result.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor); else seen.current.clear();
@@ -159,17 +162,17 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     setDraft((old) => { const next = { ...old }; if (value === undefined) delete next[key]; else next[key] = value; return next; });
   }
   if (creating) return <AuthPanel>
-    <Editor api={api} blocked={write.busy || !!write.confirm} cancelDisabled={write.busy} back={() => { create(false); write.clear(); }} save={(draft, form) => void write.run(async (confirmation) => {
-      await api.create(draft, confirmation, form); create(false); void load(applied);
+    <Editor api={view.api()} blocked={write.busy || !!write.confirm} cancelDisabled={write.busy} back={() => { create(false); write.clear(); }} save={(draft, form) => void write.run(async (confirmation) => {
+      await view.api().create(draft, confirmation, form); create(false); void load(applied);
     })} />
     {write.error && <Copy role="alert">{write.error}</Copy>}
     {write.confirm && <AuthAction label={confirmPendingLabel} action={write.confirm} disabled={write.busy} />}
   </AuthPanel>;
-  if (visible) return <AuthPanel><Detail key={visible} api={api} id={visible} changed={() => { changed.current = true; }} back={() => {
-    setVisible(undefined); if (changed.current) { changed.current = false; void load(applied); }
+  if (visible) return <AuthPanel><Detail key={visible} api={view.api()} id={visible} changed={() => { changed.current = true; }} back={() => {
+    view.move(); setVisible(undefined); if (changed.current) { changed.current = false; void load(applied); }
   }} /></AuthPanel>;
-  if (picker) return <AuthPanel><Picker api={api} field={picker} back={() => setPicker(undefined)} choose={(id, name) => {
-    setSelected((old) => ({ ...old, [picker]: name })); change(picker, id); setPicker(undefined);
+  if (picker) return <AuthPanel><Picker api={view.api()} field={picker} back={() => { view.move(); setPicker(undefined); }} choose={(id, name) => {
+    view.move(); setSelected((old) => ({ ...old, [picker]: name })); change(picker, id); setPicker(undefined);
   }} /></AuthPanel>;
   return <AuthPanel>
     <Copy role="header">Movimientos</Copy><AuthAction label="Volver al resumen" action={back} />
@@ -177,7 +180,7 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     {write.error && <Copy role="alert">{write.error}</Copy>}
     <AuthAction label="Filtros" selected={showFilters} action={() => toggleFilters(!showFilters)} />
     {showFilters && <>
-      {(Object.keys(chooseLabel) as Selection[]).map((field) => <AuthAction key={field} label={selected[field] ? `${chooseLabel[field]}: ${selected[field]}` : chooseLabel[field]} action={() => setPicker(field)} disabled={busy} />)}
+      {(Object.keys(chooseLabel) as Selection[]).map((field) => <AuthAction key={field} label={selected[field] ? `${chooseLabel[field]}: ${selected[field]}` : chooseLabel[field]} action={() => { view.move(); setPicker(field); }} disabled={busy} />)}
       <Copy>Estado del movimiento</Copy><AuthAction label="Todos" selected={!draft.status} action={() => change("status")} disabled={busy} />
       {Object.entries(statuses).map(([key, label]) => <AuthAction key={key} label={label} selected={draft.status === key} action={() => change("status", key)} disabled={busy} />)}
       {fields.map(([key, label]) => <View key={key}><Copy>{label}</Copy><TextInput accessibilityLabel={label} value={draft[key] ?? ""} editable={!busy}
@@ -187,7 +190,7 @@ export function TransactionsScreen({ api, back, startCreating = false }: { api: 
     {error && <><Copy role="alert">{error}</Copy>{retry.current && <AuthAction label="Reintentar" action={retry.current} disabled={busy} />}</>}
     {busy && <Copy>Cargando movimientos…</Copy>}
     {!busy && !error && !page.items.length && <Copy>No hay movimientos para estos filtros.</Copy>}
-    {page.items.map(({ id, title, status, occurredAt, amount }) => <View key={id}><AuthAction label={title} action={() => setVisible(id)} />
+    {page.items.map(({ id, title, status, occurredAt, amount }) => <View key={id}><AuthAction label={title} action={() => { view.move(); setVisible(id); }} />
       <Copy>{status} · {occurredAt} · {amount}</Copy></View>)}
     {page.nextCursor && !error && <AuthAction label="Cargar más" disabled={busy} action={() => void load(applied, page.nextCursor ?? undefined)} />}
   </AuthPanel>;

@@ -14,7 +14,11 @@ import { createFunds } from "../foundation/funds";
 import { createIdentity } from "../foundation/identity";
 import { createImportCommits } from "../foundation/import-commits";
 import { createImports, type StatementFileSource } from "../foundation/imports";
+import { createInbox } from "../foundation/notification-inbox";
+import { createNotificationPreferences, type PushTokenSource } from "../foundation/notification-preferences";
 import { createOffline } from "../foundation/offline-cache";
+import { createReceiptConfirmations } from "../foundation/receipt-confirmations";
+import { createReceipts, type ReceiptImageSource } from "../foundation/receipts";
 import { createScenarios } from "../foundation/scenarios";
 import { createTransactions } from "../foundation/transactions";
 import { createTransfers } from "../foundation/transfers";
@@ -28,8 +32,11 @@ import { DebtsScreen } from "../mobile-shell/debts-screen";
 import { ForecastsScreen } from "../mobile-shell/forecasts-screen";
 import { FundsScreen } from "../mobile-shell/funds-screen";
 import { ImportsScreen } from "../mobile-shell/imports-screen";
+import { NotificationInbox } from "../mobile-shell/notification-inbox";
+import { NotificationSettings } from "../mobile-shell/notification-settings";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
 import { OutboxPanel } from "../mobile-shell/outbox-panel";
+import { ReceiptsScreen } from "../mobile-shell/receipts-screen";
 import { ScenariosScreen } from "../mobile-shell/scenarios-screen";
 import { paletteFor } from "../mobile-shell/tokens";
 import { TransactionsScreen } from "../mobile-shell/transactions-screen";
@@ -40,14 +47,15 @@ const offline = createOffline(createIdentity((operation) => transport().withSess
 
 export default function Index() { return <SaviaMobile />; }
 
-export function SaviaMobile({ statementSource }: { statementSource?: StatementFileSource }) {
+type Sources = { statementSource?: StatementFileSource; imageSource?: ReceiptImageSource; pushTokenSource?: PushTokenSource };
+export function SaviaMobile(sources: Sources) {
   return <AuthGate auth={getAuth} identity={offline.identity} signOut={offline.signOut}
-    home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} statementSource={statementSource} />} />;
+    home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
-function WorkspaceHome({ id, profile, statementSource }: { id: string; profile: string; statementSource?: StatementFileSource }) {
+function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
   const latest = useRef(0);
   const [{ route, generation }, navigate] = useState<{ route: Route; generation: number }>({ route: "home", generation: 0 });
   const [snapshot, setSnapshot] = useState<{ generation: number; at: number | null }>();
@@ -60,7 +68,13 @@ function WorkspaceHome({ id, profile, statementSource }: { id: string; profile: 
       if (latest.current !== generation) return;
       setSnapshot((old) => ({ generation, at: at !== null && merge && old?.generation === generation ? Math.min(old.at ?? at, at) : at }));
     };
-    const scoped = offline.scope(profile, id, workspaceRequest, (at) => publish(at, true), () => publish(null));
+    let visible = 0;
+    const scopeFor = (owner: number) => offline.scope(profile, id, workspaceRequest,
+      (at) => { if (visible === owner) publish(at, true); }, () => { if (visible === owner) publish(null); });
+    const scoped = scopeFor(0);
+    const views = <T,>(make: (request: ScopedRequest) => T) => () => {
+      ++visible; publish(null); return make(scopeFor(visible));
+    };
     async function reportBatch<T>(read: (scope: ScopedRequest) => Promise<T>) {
       let oldest: number | null = null;
       const scope = offline.scope(profile, id, workspaceRequest, (at) => { oldest = Math.min(oldest ?? at, at); });
@@ -68,33 +82,44 @@ function WorkspaceHome({ id, profile, statementSource }: { id: string; profile: 
       publish(oldest);
       return result;
     }
-    const queued: ScopedRequest = (expected, path, options) => (options?.method ?? "GET") === "GET"
-      ? scoped(expected, path, options) : box.request(expected, path, options);
-    const transactions = createTransactions(queued, id);
-    const { list, detail } = createAccounts(scoped, id);
-    return { accounts: { ...accountWrites, list, detail }, transactions, transfers: createTransfers(queued, id, transactions.transferAccounts),
-      budgets: createBudgets(scoped, id, () => transactions.options("categories")), budgetWrites: createBudgetWrites(scoped, id),
-      funds: createFunds(scoped, id), fundWrites: createFundWrites(scoped, id, transactions.transferAccounts),
-      debts: createDebts(scoped, id), debtPayments: createDebtPayments(scoped, id, transactions.transferAccounts), analytics: createAnalytics(scoped, id, reportBatch), forecasts: createForecasts(scoped, id), scenarios: createScenarios(scoped, id),
+    const queued = (reads: ScopedRequest): ScopedRequest => (expected, path, options) => (options?.method ?? "GET") === "GET"
+      ? reads(expected, path, options) : box.request(expected, path, options);
+    const tx = (request: ScopedRequest) => createTransactions(queued(request), id);
+    const transactions = tx(scoped), receipts = createReceipts(scoped, id);
+    const accounts = (request: ScopedRequest) => {
+      const { list, detail } = createAccounts(request, id);
+      return { ...accountWrites, list, detail };
+    };
+    const budgets = (request: ScopedRequest) => createBudgets(request, id, () => tx(request).options("categories"));
+    const funds = (request: ScopedRequest) => ({ api: createFunds(request, id), writes: createFundWrites(request, id, tx(request).transferAccounts) });
+    const debts = (request: ScopedRequest) => ({ api: createDebts(request, id), payments: createDebtPayments(request, id, tx(request).transferAccounts) });
+    return { accounts: accounts(scoped), accountViews: views(accounts), transactions, transactionViews: views(tx),
+      transfers: createTransfers(queued(scoped), id, transactions.transferAccounts), budgets: budgets(scoped), budgetViews: views(budgets), budgetWrites: createBudgetWrites(scoped, id),
+      funds: funds(scoped), fundViews: views(funds), debts: debts(scoped), debtViews: views(debts), analytics: createAnalytics(scoped, id, reportBatch), forecasts: createForecasts(scoped, id), scenarios: createScenarios(scoped, id),
+      receipts, receiptConfirmations: createReceiptConfirmations(scoped, id, receipts.detail, transactions.transferAccounts),
+      inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id),
       imports: createImports(scoped, id), importCommits: createImportCommits(scoped, id, transactions.transferAccounts) };
   }, [accountWrites, box, profile, id, generation]);
   const back = () => show("home");
-  return <><OfflineBanner savedAt={snapshot?.generation === generation ? snapshot.at : null} /><OutboxPanel box={box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} back={back} />
-    : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} back={back} startCreating={route === "new-transaction"} />
+  return <><OfflineBanner savedAt={snapshot?.generation === generation ? snapshot.at : null} /><OutboxPanel box={box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} nextView={apis.accountViews} back={back} />
+    : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} nextView={apis.transactionViews} back={back} startCreating={route === "new-transaction"} />
     : route === "transfers" ? <TransfersScreen api={apis.transfers} back={back} />
-    : route === "budgets" ? <BudgetsScreen api={apis.budgets} writes={apis.budgetWrites} back={back} />
-    : route === "funds" ? <FundsScreen api={apis.funds} writes={apis.fundWrites} back={back} />
-    : route === "debts" ? <DebtsScreen api={apis.debts} payments={apis.debtPayments} back={back} />
+    : route === "budgets" ? <BudgetsScreen api={apis.budgets} nextView={apis.budgetViews} writes={apis.budgetWrites} back={back} />
+    : route === "funds" ? <FundsScreen {...apis.funds} nextView={apis.fundViews} back={back} />
+    : route === "debts" ? <DebtsScreen {...apis.debts} nextView={apis.debtViews} back={back} />
     : route === "dashboard" ? <DashboardScreen api={apis.analytics} back={back} />
     : route === "analytics" ? <AnalyticsScreen api={apis.analytics} back={back} />
     : route === "forecasts" ? <ForecastsScreen api={apis.forecasts} back={back} />
     : route === "scenarios" ? <ScenariosScreen api={apis.scenarios} back={back} />
     : route === "imports" ? <ImportsScreen api={apis.imports} commits={apis.importCommits} source={statementSource} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} />}</>;
+    : route === "receipts" ? <ReceiptsScreen api={apis.receipts} confirmations={apis.receiptConfirmations} source={imageSource} back={back} />
+    : route === "notifications" ? <NotificationInbox api={apis.inbox} back={back} preferences={() => show("notification-settings")} />
+    : route === "notification-settings" ? <NotificationSettings api={apis.notificationPreferences} tokenSource={pushTokenSource} back={() => show("notifications")} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -122,6 +147,8 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openFunds && <AuthAction label="Fondos" action={openFunds} />}
         {openDebts && <AuthAction label="Deudas" action={openDebts} />}
         {openImports && <AuthAction label="Importar extractos" action={openImports} />}
+        {openReceipts && <AuthAction label="Recibos" action={openReceipts} />}
+        {openNotifications && <AuthAction label="Notificaciones" action={openNotifications} />}
       </ScrollView>
     </SafeAreaView>
   );
