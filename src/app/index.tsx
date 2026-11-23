@@ -21,9 +21,12 @@ import { createMembers } from "../foundation/members";
 import { createInbox } from "../foundation/notification-inbox";
 import { createNotificationPreferences, type PushTokenSource } from "../foundation/notification-preferences";
 import { createOffline } from "../foundation/offline-cache";
+import { memoryPendingJournal } from "../foundation/pending-submission";
 import { createReceiptConfirmations } from "../foundation/receipt-confirmations";
 import { createReceipts, type ReceiptImageSource } from "../foundation/receipts";
+import { createRecurringRules } from "../foundation/recurring-rules";
 import { createScenarios } from "../foundation/scenarios";
+import { createSubscriptions } from "../foundation/subscriptions";
 import { createTransactions } from "../foundation/transactions";
 import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
@@ -48,7 +51,9 @@ import { OfflineBanner } from "../mobile-shell/offline-banner";
 import { OutboxPanel } from "../mobile-shell/outbox-panel";
 import { defaultPushTokenSource } from "../mobile-shell/push-token-source";
 import { ReceiptsScreen } from "../mobile-shell/receipts-screen";
+import { RecurringRulesScreen } from "../mobile-shell/recurring-rules-screen";
 import { ScenariosScreen } from "../mobile-shell/scenarios-screen";
+import { SubscriptionsScreen } from "../mobile-shell/subscriptions-screen";
 import { paletteFor } from "../mobile-shell/tokens";
 import { TransactionsScreen } from "../mobile-shell/transactions-screen";
 import { TransfersScreen } from "../mobile-shell/transfers-screen";
@@ -66,7 +71,7 @@ export function SaviaMobile(sources: Sources) {
     home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members" | "subscriptions" | "recurring-rules";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
 function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
   const latest = useRef(0);
@@ -76,6 +81,7 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
   const background = useMemo(() => offline.scope(profile, id, workspaceRequest, () => {}), [profile, id]);
   const box = useMemo(() => offline.outbox(profile, id, background), [profile, id, background]);
   const accountWrites = useMemo(() => createAccounts(background, id), [background, id]);
+  const [fundJournal] = useState(memoryPendingJournal);
   const apis = useMemo(() => {
     const publish = (at: number | null, merge = false) => {
       if (latest.current !== generation) return;
@@ -104,15 +110,16 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
       return { ...accountWrites, list, detail };
     };
     const budgets = (request: ScopedRequest) => createBudgets(request, id, () => tx(request).options("categories"));
-    const funds = (request: ScopedRequest) => ({ api: createFunds(request, id), writes: createFundWrites(request, id, tx(request).transferAccounts) });
+    const funds = (request: ScopedRequest) => ({ api: createFunds(request, id, request), writes: createFundWrites(request, id, tx(request).transferAccounts, fundJournal) });
     const debts = (request: ScopedRequest) => ({ api: createDebts(request, id), payments: createDebtPayments(request, id, tx(request).transferAccounts) });
     return { accounts: accounts(scoped), accountViews: views(accounts), transactions, transactionViews: views(tx),
       transfers: createTransfers(queued(scoped), id, transactions.transferAccounts), budgets: budgets(scoped), budgetViews: views(budgets), budgetWrites: createBudgetWrites(scoped, id),
       funds: funds(scoped), fundViews: views(funds), debts: debts(scoped), debtViews: views(debts), analytics: createAnalytics(scoped, id, reportBatch), forecasts: createForecasts(scoped, id), scenarios: createScenarios(scoped, id),
+      subscriptions: createSubscriptions(scoped, id), recurringRules: createRecurringRules(scoped, id),
       receipts, receiptConfirmations: createReceiptConfirmations(scoped, id, receipts.detail, transactions.transferAccounts),
       inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id), assistant: createAssistant(scoped, id), aiCredentials: createAICredentials(scoped, id), access: createAccess(scoped, id), members: createMembers(scoped, id),
       imports: createImports(scoped, id), importCommits: createImportCommits(scoped, id, transactions.transferAccounts) };
-  }, [accountWrites, box, profile, id, generation]);
+  }, [accountWrites, box, profile, id, generation, fundJournal]);
   const back = () => show("home");
   return <><OfflineBanner savedAt={snapshot?.generation === generation ? snapshot.at : null} /><OutboxPanel box={box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} nextView={apis.accountViews} back={back} />
     : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} nextView={apis.transactionViews} back={back} startCreating={route === "new-transaction"} />
@@ -132,11 +139,13 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
     : route === "ai-credentials" ? <AICredentialsScreen api={apis.aiCredentials} back={back} />
     : route === "access" ? <AccessScreen api={apis.access} back={back} />
     : route === "members" ? <MembersScreen api={apis.members} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} />}</>;
+    : route === "subscriptions" ? <SubscriptionsScreen api={apis.subscriptions} back={back} />
+    : route === "recurring-rules" ? <RecurringRulesScreen api={apis.recurringRules} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} openSubscriptions={() => show("subscriptions")} openRecurringRules={() => show("recurring-rules")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void; openSubscriptions?: () => void; openRecurringRules?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers, openSubscriptions, openRecurringRules }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -159,6 +168,8 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
           </Pressable>}
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
         {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
+        {openSubscriptions && <AuthAction label="Suscripciones detectadas" action={openSubscriptions} />}
+        {openRecurringRules && <AuthAction label="Reglas recurrentes" action={openRecurringRules} />}
         {openTransfers && <AuthAction label="Transferencias" action={openTransfers} />}
         {openBudgets && <AuthAction label="Presupuestos" action={openBudgets} />}
         {openFunds && <AuthAction label="Fondos" action={openFunds} />}

@@ -32,6 +32,7 @@ type RequestInput = { method?: string; body?: unknown; multipart?: FormData; ide
 type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
+  onlineOnly?: true;
   expectedProfile?: string;
   subjectResource?: true;
   form?: object;
@@ -50,6 +51,7 @@ export class TransportError extends Error {
 }
 
 export const isOfflineFailure = (error: unknown) => error instanceof TransportError && (error.kind === "network" || error.kind === "timeout");
+export const isStrongETag = (value: unknown): value is string => typeof value === "string" && value.endsWith('"') && /^"[\x21\x23-\x7e]{0,128}"$/.test(value);
 
 async function withDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, ms: number, parent?: AbortSignal | null): Promise<T> {
   if (parent?.aborted) throw new TransportError("network");

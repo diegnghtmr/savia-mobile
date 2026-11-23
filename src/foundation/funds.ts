@@ -3,6 +3,7 @@ import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
 import { percentOf } from "./planning-money";
+import { isOfflineFailure, isStrongETag, TransportError } from "./transport";
 import { uuid } from "./workspace-context";
 
 export const fundsPath = "/v1/funds";
@@ -44,7 +45,19 @@ function listQuery(input: unknown, scope: string) {
   } catch { throw new InvalidDraft("Filtros de fondos no válidos."); }
 }
 
-export function createFunds(request: ScopedRequest, workspace: string) {
+export function parseFundDetail(input: unknown, expected: string) {
+  const { body, etag } = fundRecord(input);
+  const { objective, responsibleMemberIds, etag: bodyETag } = fundRecord(body);
+  const fund = parseFund(body);
+  const responsible = Array.isArray(responsibleMemberIds) ? responsibleMemberIds.map(uuid) : [];
+  if (fund.id !== expected || !isStrongETag(etag) || etag !== bodyETag ||
+    (objective != null && (typeof objective !== "string" || [...objective].length > 500)) ||
+    (responsibleMemberIds !== undefined && !Array.isArray(responsibleMemberIds)) || responsible.some((id) => !id) ||
+    new Set(responsible).size !== responsible.length) throw new TypeError();
+  return { ...fund, etag, objective: typeof objective === "string" ? objective : null, responsible: responsible as string[] };
+}
+
+export function createFunds(request: ScopedRequest, workspace: string, online?: ScopedRequest) {
   const scope = uuid(workspace) ?? "";
   async function list(filters: unknown = {}) {
     const { params, cursor } = listQuery(filters, scope);
@@ -59,6 +72,17 @@ export function createFunds(request: ScopedRequest, workspace: string) {
   return { list, async detail(raw: unknown) {
     const id = uuid(raw);
     if (!id || !scope) throw new InvalidDraft("Fondo no válido.");
+    if (online) {
+      let verified = false;
+      try {
+        return parseFundDetail(await online(scope, `${fundsPath}/${id}`, { successStatus: 200, includeETag: true,
+          onMembership: async (context) => { verified = context.active?.id === scope; } }), id);
+      } catch (error) {
+        // A verified legacy endpoint may be absent. A list-derived fund never carries an editable ETag.
+        const unavailable = verified && error instanceof TransportError && (error.status === 404 || error.status === 501);
+        if (!isOfflineFailure(error) && !unavailable) throw error;
+      }
+    }
     const cursors = new Set<string>(), ids = new Set<string>();
     let cursor: string | null = null;
     do {
@@ -75,3 +99,4 @@ export function createFunds(request: ScopedRequest, workspace: string) {
 }
 export type Funds = ReturnType<typeof createFunds>;
 export type Fund = ReturnType<typeof parseFund>;
+export type FundDetail = ReturnType<typeof parseFundDetail>;

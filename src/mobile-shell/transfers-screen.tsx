@@ -59,7 +59,8 @@ function TransferForm({ mode, accounts, busy, submit }: { mode: TransferMode; ac
   return <>
     <Copy>{mode === "transfer" ? "Elige dos cuentas distintas de la misma moneda." : "Elige dos cuentas de monedas distintas. Escribe el importe recibido y la tasa aplicada."}</Copy>
     {picker("sourceAccountId", "Origen")}{picker("destinationAccountId", "Destino")}{field("amount", "Importe enviado")}
-    {mode === "exchange" && <>{field("received", "Importe recibido")}{field("executedRate", "Tasa ejecutada")}</>}
+    {mode === "exchange" ? <>{field("received", "Importe recibido")}{field("executedRate", "Tasa ejecutada")}</>
+      : <>{field("fee", "Comisión (opcional)")}<Copy>La comisión se debita de la cuenta de origen como un gasto separado.</Copy></>}
     {field("date", "Fecha (AAAA-MM-DD, UTC)")}{field("description", "Descripción (opcional)")}
     <AuthAction label={mode === "transfer" ? "Registrar transferencia" : "Registrar cambio"} disabled={busy} action={() => submit(draft, form.current, () => { form.current = {}; setDraft({}); })} />
   </>;

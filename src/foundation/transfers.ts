@@ -10,7 +10,7 @@ import { uuid } from "./workspace-context";
 export type TransferMode = "transfer" | "exchange";
 const common = ["sourceAccountId", "destinationAccountId", "amount", "date", "description"] as const;
 const extra = ["received", "executedRate"] as const;
-export type TransferDraft = Partial<Record<typeof common[number] | typeof extra[number], string>>;
+export type TransferDraft = Partial<Record<typeof common[number] | typeof extra[number] | "fee", string>>;
 const rateFields = ["baseCurrency", "quoteCurrency", "from", "to"] as const;
 export type RateFilters = Partial<Record<typeof rateFields[number], string>>;
 const decimal = /^(\d+)(?:[.,](\d+))?$/;
@@ -40,7 +40,7 @@ function positiveRate(value: unknown) {
 function transferBody(mode: unknown, input: unknown, currencies: ReadonlyMap<string, string>) {
   try {
     if (mode !== "transfer" && mode !== "exchange") throw new TypeError();
-    const draft = object(input), allowed: readonly string[] = mode === "transfer" ? common : [...common, ...extra];
+    const draft = object(input), allowed: readonly string[] = mode === "transfer" ? [...common, "fee"] : [...common, ...extra];
     if (Object.keys(draft).some((field) => !allowed.includes(field))) throw new TypeError();
     const sourceAccountId = uuid(draft.sourceAccountId), destinationAccountId = uuid(draft.destinationAccountId);
     if (!sourceAccountId || !destinationAccountId || sourceAccountId === destinationAccountId) throw new TypeError();
@@ -51,8 +51,13 @@ function transferBody(mode: unknown, input: unknown, currencies: ReadonlyMap<str
     if (typeof raw !== "string" || raw.includes("\0") || [...raw.trim()].length > 500) throw new TypeError();
     const base = { sourceAccountId, destinationAccountId, occurredAt: `${draft.date}T00:00:00.000Z`, description: raw.trim() || null };
     const amount = positiveAmount(draft.amount, from);
-    return mode === "transfer" ? { path: "/v1/transfers", body: { ...base, amount } }
-      : { path: "/v1/currency-exchanges", body: { ...base, sourceAmount: amount, destinationAmount: positiveAmount(draft.received, to), executedRate: positiveRate(draft.executedRate) } };
+    if (mode === "transfer") {
+      const rawFee = Object.hasOwn(draft, "fee") ? draft.fee : "";
+      if (typeof rawFee !== "string" || rawFee.length > 64) throw new TypeError();
+      const fee = rawFee.trim() ? positiveAmount(rawFee, from) : undefined;
+      return { path: "/v1/transfers", body: { ...base, amount, ...(fee && { fee }) } };
+    }
+    return { path: "/v1/currency-exchanges", body: { ...base, sourceAmount: amount, destinationAmount: positiveAmount(draft.received, to), executedRate: positiveRate(draft.executedRate) } };
   } catch { throw new InvalidDraft("Revisa los datos de la transferencia."); }
 }
 

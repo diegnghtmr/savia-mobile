@@ -140,7 +140,7 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
         const owner = await optional(principal()), started = owner ? await stamp() : null;
         let observed = started;
         const key = `${options?.includeETag ? "etag:" : ""}${path}`;
-        const read = (options?.method ?? "GET") === "GET" && cacheable.test(path);
+        const read = !options?.onlineOnly && (options?.method ?? "GET") === "GET" && cacheable.test(path);
         const current = async () => owner !== null && ticket === epoch && await optional(principal()) === owner;
         try {
           const payload = await request(workspace, path, { ...options, expectedProfile: profile, onMembership: async (context) => {

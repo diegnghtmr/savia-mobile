@@ -53,7 +53,7 @@ function setup({ lostReply = false } = {}) {
     const body = JSON.parse(String(init.body));
     writes.push({ path: pathname, key, persisted: pending().some(([, saved]) => pendingKey(saved) === key), body });
     if (records.has(key)) return reply(records.get(key), 201);
-    const result = { id: id(9), sourceAccountId: body.sourceAccountId, destinationAccountId: body.destinationAccountId };
+    const result = { id: id(9), sourceAccountId: body.sourceAccountId, destinationAccountId: body.destinationAccountId, ...(body.fee && { fee: body.fee }) };
     records.set(key, result);
     if (lostReply && records.size === 1) throw new Error("Reply lost after commit");
     return reply(result, 201);
@@ -65,14 +65,14 @@ function setup({ lostReply = false } = {}) {
   return { connect, read, send, writes, pending, records, setMembershipDate: (date: string) => { membershipDate = date; }, revoke: () => { member = false; } };
 }
 
-test("rejects invalid drafts, account/currency mismatches, fees and invalid rate filters with no submission I/O", async () => {
+test("rejects invalid drafts, account/currency mismatches, malformed fees and invalid rate filters with no submission I/O", async () => {
   const { connect, read, send, writes, pending } = setup();
   const api = connect(); await api.loadAccounts();
   read.mockClear(); send.mockClear(); secure.getItemAsync.mockClear(); secure.setItemAsync.mockClear();
-  for (const bad of [{ destinationAccountId: source }, { destinationAccountId: yen }, { destinationAccountId: other }, { destinationAccountId: [destination] }, { fee: "1" }, { received: "1" }, { amount: "0" }, { amount: "-1.01" }, { amount: "9.0001" }, { amount: "9223372036854775.808" }, { date: "2026-02-29" }]) {
+  for (const bad of [{ destinationAccountId: source }, { destinationAccountId: yen }, { destinationAccountId: other }, { destinationAccountId: [destination] }, { fee: "0" }, { fee: "-1" }, { fee: "1.0001" }, { fee: "9223372036854775.808" }, { fee: ["1"] }, { received: "1" }, { amount: "0" }, { amount: "-1.01" }, { amount: "9.0001" }, { amount: "9223372036854775.808" }, { date: "2026-02-29" }]) {
     await expect(api.submit("transfer", { ...transfer, ...bad })).rejects.toThrow("Revisa los datos de la transferencia.");
   }
-  for (const bad of [{ destinationAccountId: destination }, { received: undefined }, { received: "1.1" }, { executedRate: undefined }, { executedRate: "0.000" }, { executedRate: "2e5" }, { executedRate: ["1", "2"] }]) {
+  for (const bad of [{ destinationAccountId: destination }, { fee: "1" }, { received: undefined }, { received: "1.1" }, { executedRate: undefined }, { executedRate: "0.000" }, { executedRate: "2e5" }, { executedRate: ["1", "2"] }]) {
     await expect(api.submit("exchange", { ...exchange, ...bad })).rejects.toThrow("Revisa los datos de la transferencia.");
   }
   for (const bad of [{ baseCurrency: ["KWD", "KWD"] }, { quoteCurrency: "ZZZ" }, { from: "2026-02-29" }, { from: "2026-11-02", to: "2026-11-01" }, { limit: "5" }, new URLSearchParams("from=2026-11-01&from=2026-11-02")]) {
@@ -102,7 +102,7 @@ test.each([["transfer", transfer], ["exchange", exchange]])("replays a committed
   expect(send.mock.calls.map(([url, init]) => [new URL(url).pathname, new Headers(init.headers).get("X-Workspace-Id")])).toEqual([["/v1/me", null], ["/v1/workspaces", null], ["/v1/workspaces", null]]);
 });
 
-test("offers a transfer and exchange form without fees and requires both received amount and executed rate", async () => {
+test("keeps exchange fee-free and requires both received amount and executed rate", async () => {
   const { connect, writes } = setup();
   await render(<TransfersScreen api={connect()} back={jest.fn()} />);
   expect(await screen.findByRole("button", { name: "Origen: Efectivo (KWD)" })).toBeTruthy();
@@ -115,6 +115,21 @@ test("offers a transfer and exchange form without fees and requires both receive
   await enter("Tasa ejecutada", "0.12"); await press("Registrar cambio");
   expect(await screen.findByText("Cambio de moneda registrado.")).toBeTruthy();
   expect(writes).toHaveLength(1);
+});
+
+test("sends an optional transfer fee separately in the source currency and replays it with the same key", async () => {
+  const f = setup({ lostReply: true });
+  await render(<TransfersScreen api={f.connect()} back={jest.fn()} />);
+  await press("Origen: Efectivo (KWD)"); await press("Destino: Ahorros (KWD)");
+  await enter("Importe enviado", "25,125"); await enter("Comisión (opcional)", " 1,075 ");
+  await enter("Fecha (AAAA-MM-DD, UTC)", "2024-02-29"); await press("Registrar transferencia");
+  await screen.findByText("No pudimos registrar la operación. Vuelve a intentarlo.");
+  expect(f.writes[0]).toMatchObject({ path: "/v1/transfers", key: expect.any(String), body: {
+    amount: { amountMinor: "25125", currency: "KWD" }, fee: { amountMinor: "1075", currency: "KWD" },
+  } });
+  await enter("Comisión (opcional)", "01.075"); await press("Registrar transferencia");
+  await screen.findByText("Transferencia registrada.");
+  expect(f.writes).toEqual([f.writes[0], f.writes[0]]); expect(f.records.size).toBe(1); expect(f.pending()).toEqual([]);
 });
 
 test.each(["transfer", "exchange"])("blocks an expired %s until explicit confirmation sends the same draft with a new key", async (mode) => {

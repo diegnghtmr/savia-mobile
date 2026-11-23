@@ -12,14 +12,14 @@ jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: j
 const secure = jest.mocked(SecureStore);
 const id = (n: number) => `cabc0000-0000-4000-8000-00000000000${n}`;
 const [workspace, profile, fund, account, jpy, receipt] = [1, 2, 3, 4, 5, 6].map(id);
-const path = "/v1/funds", contributions = `${path}/${fund}/contributions`, hours = 3_600_000;
+const path = "/v1/funds", detail = `${path}/${fund}`, contributions = `${detail}/contributions`, withdrawals = `${detail}/withdrawals`, hours = 3_600_000;
 const targetDate = "2028-02-29", date = "2026-11-01";
 const input = { name: "Viaje futuro", currency: "KWD", targetAmount: "9007199254740993,012", linkedAccountId: account.toUpperCase(), targetDate };
 const contribution = { accountId: account.toUpperCase(), amount: "9007199254740993,012", date, notes: "  Aporte manual  " };
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 const enter = async (name: string, value: string) => fireEvent.changeText(await screen.findByLabelText(name), value);
 
-function setup() {
+function setup(live = false, tagPrefix = "") {
   jest.clearAllMocks();
   const storage = new Map([[`savia.workspace.${profile}`, workspace]]);
   secure.getItemAsync.mockImplementation(async (key) => storage.get(key) ?? null);
@@ -31,22 +31,43 @@ function setup() {
   const funds = [{ id: fund, name: "Reserva", currency: "KWD", targetAmount: money("9007199254740993012"), currentAmount: money("0"), status: "active", linkedAccountId: account }];
   const replay = new Map<string, { body: object; at: number }>();
   const writes: { path: string; key: string; body: Record<string, unknown>; match: string | null; persisted: boolean }[] = [];
-  let revoked = false, lose = false, invalidReceipt = false, now = Date.UTC(2026, 10, 1), online = true;
+  let revoked = false, lose = false, invalidReceipt = false, now = Date.UTC(2026, 10, 1), online = true, version = 7, refusal = 0, detailMissing = false;
+  const tag = () => `"${tagPrefix}${version}"`;
+  if (live) funds[0].currentAmount = money("10000");
   const read = jest.fn().mockResolvedValue({ accessToken: "fixture" });
   const send = jest.fn(async (url: string, init: RequestInit) => {
     if (!online) throw new Error("Disconnected");
     const { pathname } = new URL(url), headers = new Headers(init.headers);
-    const reply = (body: unknown, status = 200) => ({ status, ok: status < 300, redirected: false,
-      headers: new Headers({ Date: new Date(now).toUTCString() }), json: async () => body });
+    const reply = (body: unknown, status = 200, etag?: string) => ({ status, ok: status < 300, redirected: false,
+      headers: new Headers({ Date: new Date(now).toUTCString(), ...(etag && { ETag: etag }), ...(status >= 400 && { "Content-Type": "application/problem+json" }) }), json: async () => body });
     if (pathname === "/v1/me") return reply({ id: profile });
     if (pathname === "/v1/workspaces") return reply(page(revoked ? [] : [{ id: workspace, name: "Casa" }]));
     expect(headers.get("X-Workspace-Id")).toBe(workspace);
-    if (init.method === "GET") { expect(pathname).toBe(path); return reply(page(funds)); }
-    expect(init.method).toBe("POST"); expect([path, contributions]).toContain(pathname);
+    const getDetail = () => ({ ...funds[0], etag: tag() });
+    if (init.method === "GET") {
+      if (live && pathname === detail) return detailMissing ? reply({}, 404) : reply(getDetail(), 200, tag());
+      expect(pathname).toBe(path); return reply(page(funds));
+    }
+    expect([path, contributions, detail, withdrawals]).toContain(pathname);
     const body = JSON.parse(String(init.body)), key = headers.get("Idempotency-Key")!;
     writes.push({ path: pathname, key, body, match: headers.get("If-Match"), persisted: pending().some(([, value]) => JSON.parse(value).key === key) });
     const saved = replay.get(key);
     if (saved && now - saved.at < 24 * hours) return reply(saved.body, 201);
+    if (pathname === detail) {
+      expect(init.method).toBe("PATCH");
+      if (headers.get("If-Match") !== tag()) return reply({}, 412);
+      Object.assign(funds[0], body); version++;
+      return reply(getDetail(), 200, tag());
+    }
+    expect(init.method).toBe("POST");
+    if (pathname === withdrawals) {
+      if (refusal) return reply(refusal === 422 ? { type: "https://savia.app/problems/insufficient-fund-balance" } : {}, refusal);
+      funds[0].currentAmount = money(String(BigInt(funds[0].currentAmount.amountMinor) - BigInt(body.amount.amountMinor)));
+      const result = { id: receipt, accountId: body.accountId, type: "adjustment", status: "confirmed", amount: body.amount, notes: body.reason };
+      replay.set(key, { body: result, at: now });
+      if (lose) { lose = false; throw new Error("Reply lost after commit"); }
+      return reply(result, 201);
+    }
     let result;
     if (pathname === path) {
       result = { ...body, id: id(funds.length + 6), currentAmount: money("0"), status: "active" };
@@ -64,7 +85,9 @@ function setup() {
   });
   const request = createTransport({ baseUrl: "https://api.invalid", send, sessions: { read } }).requestInWorkspace;
   const connect = () => createFundWrites(request, workspace, async () => [{ id: account, name: "Caja", currency: "KWD" }, { id: jpy, name: "Yenes", currency: "JPY" }]);
-  return { api: createFunds(request, workspace), connect, writes, pending, replay, read, send, lose: () => { lose = true; }, corrupt: () => { invalidReceipt = true; },
+  return { api: createFunds(request, workspace, live ? request : undefined), connect, writes, pending, replay, read, send,
+    refuse: (status: number) => { refusal = status; }, missingDetail: () => { detailMissing = true; }, bump: () => { version++; funds[0].name = "Reserva actualizada"; },
+    lose: () => { lose = true; }, corrupt: () => { invalidReceipt = true; },
     revoke: () => { revoked = true; }, advance: (ms: number) => { now += ms; }, disconnect: () => { online = false; } };
 }
 
@@ -175,3 +198,52 @@ test.each(["create", "contribution"])(
     expect(f.pending()).toEqual([]);
   },
 );
+
+test("an older backend without fund detail still shows the verified list-derived fund and contribution", async () => {
+  const f = setup(true); f.missingDetail();
+  await render(<FundsScreen api={f.api} writes={f.connect()} back={jest.fn()} />);
+  await press("Reserva"); await screen.findByRole("header", { name: "Reserva" });
+  expect(screen.getByRole("button", { name: "Agregar aporte" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Editar fondo|Retirar del fondo/ })).toBeNull();
+});
+
+test("edits from the verified fund detail ETag and refreshes a stale edit without resubmitting", async () => {
+  const f = setup(true, "fund-");
+  await render(<FundsScreen api={f.api} writes={f.connect()} back={jest.fn()} />);
+  await press("Reserva"); await press("Editar fondo");
+  expect(f.send.mock.calls.some(([url]) => new URL(url).pathname === detail)).toBe(true);
+  await enter("Nombre", "  Nuevo nombre  "); f.bump(); await press("Guardar cambios del fondo");
+  await screen.findByText("El fondo cambió. Revisa los datos actualizados.");
+  expect((await screen.findByLabelText("Nombre")).props.value).toBe("Reserva actualizada");
+  expect(f.writes).toEqual([{ path: detail, key: expect.any(String), match: '"fund-7"', persisted: false, body: { name: "Nuevo nombre" } }]);
+  await enter("Nombre", "Nuevo nombre"); await press("Guardar cambios del fondo");
+  await screen.findByRole("header", { name: "Nuevo nombre" });
+  expect(f.writes[1]).toMatchObject({ path: detail, key: expect.any(String), match: '"fund-8"', body: { name: "Nuevo nombre" } });
+  expect(f.writes[1].key).not.toBe(f.writes[0].key); expect(f.pending()).toEqual([]);
+});
+
+test("withdrawal validates before dispatch, reuses a lost-response key and never persists its reason", async () => {
+  const f = setup(true);
+  await render(<FundsScreen api={f.api} writes={f.connect()} back={jest.fn()} />);
+  await press("Reserva"); await press("Retirar del fondo"); await press("Cuenta: Caja (KWD)");
+  expect(screen.queryByRole("button", { name: "Cuenta: Yenes (JPY)" })).toBeNull();
+  await enter("Importe del retiro", "1,250"); f.read.mockClear(); f.send.mockClear(); secure.setItemAsync.mockClear();
+  await press("Registrar retiro"); await screen.findByText("Revisa los datos del retiro.");
+  expect(f.read).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+  await enter("Motivo del retiro", "  Reparación  "); f.lose(); await press("Registrar retiro");
+  await screen.findByText(/Necesitas conexión/);
+  await press("Registrar retiro"); await screen.findByText("Ahorrado: 8,750 KWD");
+  expect(f.writes).toEqual([expect.objectContaining({ path: withdrawals, key: expect.any(String), match: null, persisted: false,
+    body: { accountId: account, amount: { amountMinor: "1250", currency: "KWD" }, reason: "Reparación" } }), f.writes[0]]);
+  expect(f.replay.size).toBe(1); expect(secure.setItemAsync).not.toHaveBeenCalled();
+});
+
+test.each([409, 422])("a refused withdrawal (%s) shows a Spanish error without changing the fund", async (status) => {
+  const f = setup(true); f.refuse(status);
+  await render(<FundsScreen api={f.api} writes={f.connect()} back={jest.fn()} />);
+  await press("Reserva"); await press("Retirar del fondo"); await press("Cuenta: Caja (KWD)");
+  await enter("Importe del retiro", "100"); await enter("Motivo del retiro", "Reparación"); await press("Registrar retiro");
+  expect(await screen.findByRole("alert")).toHaveTextContent(status === 409 ? "El retiro supera el saldo ahorrado del fondo." : "El fondo no tiene saldo suficiente para este retiro.");
+  expect(f.replay.size).toBe(0); expect(f.pending()).toEqual([]);
+  await press("Volver al fondo"); await screen.findByText("Ahorrado: 10,000 KWD");
+});
