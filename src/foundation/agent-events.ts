@@ -1,10 +1,11 @@
 import { uuid } from "./workspace-context";
 
-export type AgentAnswer = { text: string; needsApproval: boolean; approvalId: string | null };
-export async function readAgentEvents(response: { headers: Headers; body?: ReadableStream<Uint8Array> | null }): Promise<AgentAnswer> {
+type AgentAnswer = { status: "completed"; text: string; needsApproval: boolean; approvalId: string | null };
+export type AgentRunResult = AgentAnswer | { status: "failed"; message: string | null };
+export async function readAgentEvents(response: { headers: Headers; body?: ReadableStream<Uint8Array> | null }): Promise<AgentRunResult> {
   if (!/^text\/event-stream(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "") || !response.body) throw new TypeError();
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  const answer: AgentAnswer = { text: "", needsApproval: false, approvalId: null };
+  const answer: AgentAnswer = { status: "completed", text: "", needsApproval: false, approvalId: null };
   let pending = "", bytes = 0, run: string | null = null;
   try {
     for (;;) {
@@ -26,6 +27,7 @@ export async function readAgentEvents(response: { headers: Headers; body?: Reada
           case "approval_required":
             answer.needsApproval = true; answer.approvalId = uuid(event.data?.approvalId); break;
           case "run_completed": return answer;
+          case "run_failed": return { status: "failed", message: typeof event.data?.message === "string" ? event.data.message : null };
           default: throw new TypeError();
         }
       }

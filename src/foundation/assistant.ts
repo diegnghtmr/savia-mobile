@@ -1,5 +1,5 @@
 import type { ScopedRequest } from "./accounts";
-import type { AgentAnswer } from "./agent-events";
+import type { AgentRunResult } from "./agent-events";
 import { isCursor } from "./cursor";
 import { fundRecord } from "./funds";
 import { InvalidDraft } from "./identity-draft";
@@ -76,7 +76,7 @@ export function createAssistant(request: ScopedRequest, workspace: string) {
       const id = uuid(raw);
       if (!id) throw new InvalidDraft("Conversación no válida.");
       const message = draft(input, 20000, "Escribe un mensaje de hasta 20 000 caracteres.");
-      return write(`${conversations}/${id}/messages`, { message }, 200, (result) => result as AgentAnswer, confirmation, { events: true });
+      return write(`${conversations}/${id}/messages`, { message }, 200, (result) => result as AgentRunResult, confirmation, { events: true });
     },
     async detail(raw: unknown) {
       reviewed = null;

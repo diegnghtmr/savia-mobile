@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -42,17 +42,13 @@ test("allows SQLite only behind its cipher adapter and the SQLCipher plugin", as
 });
 
 const pickerPaths = ["src/mobile-shell/image-picker-source.ts", "src/mobile-shell/document-picker-source.ts"];
-const cleanup = `import type * as PickerCache from "expo-file-system";
-function releasePickerCopy({ uri, file }: PickerAsset) {
-  if (file || !uri.startsWith("file:///")) return;
-  const { File, Paths } = require("expo-file-system") as typeof PickerCache;
-  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
-}`;
 for (const path of pickerPaths) test(`allows only temporary-file cleanup in ${path}`, async (t) => {
+  const cleanup = await readFile(new URL(`../${path}`, import.meta.url), "utf8");
   const app = await fixture(t, { [path]: cleanup });
   await assert.doesNotReject(audit(app));
   for (const source of [
     `${cleanup}\nlocalStorage.setItem("x", "y");`,
+    `${cleanup}\nreleasePickerCopy({ uri: "file:///sandbox/tmp/other.csv", name: "other.csv" });`,
     cleanup.replace("new File(uri).delete()", 'new File(uri).write("fixture")'),
     cleanup.replace("new File(uri).delete()", "new File(uri).copy(File)"),
     cleanup.replace("new File(uri).delete()", "new File(uri).move(File)"),
@@ -140,3 +136,20 @@ test("receipt picker audit exception does not allow writing image bytes", async 
   });
   await assert.rejects(audit(app), { message: `${path}: unapproved persistence` });
 });
+
+// Reviewer regression (verify mwtk0xwr). Append to scripts/audit.test.mjs.
+for (const path of ["src/mobile-shell/image-picker-source.ts", "src/mobile-shell/document-picker-source.ts"]) {
+  test(`picker audit requires the picker-copy guard in ${path}`, async (t) => {
+    const app = await fixture(t, {
+      [path]: `import type * as PickerCache from "expo-file-system";
+function isPickerCopy() { return true; }
+function releasePickerCopy({ uri, file }: PickerAsset) {
+  if (file || !uri.startsWith("file:///")) return;
+  const { File, Paths } = require("expo-file-system") as typeof PickerCache;
+  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
+}
+releasePickerCopy({ uri: "file:///sandbox/Documents/original.csv" });`,
+    });
+    await assert.rejects(audit(app), { message: `${path}: unapproved persistence` });
+  });
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentAnswer } from "../foundation/agent-events";
+import type { AgentRunResult } from "../foundation/agent-events";
 import type { Approval, Assistant, Decision } from "../foundation/assistant";
 import { InvalidDraft } from "../foundation/identity-draft";
 import { TransportError } from "../foundation/transport";
@@ -30,7 +30,7 @@ function usePage<T extends { id: string }>(get: (cursor?: string) => Promise<Pag
 export function AssistantScreen({ api, back }: { api: Assistant; back: () => void }) {
   const [route, setRoute] = useState<"conversations" | "approvals" | "detail">("conversations");
   const [title, setTitle] = useState(""), [message, setMessage] = useState(""), [approvalId, setApprovalId] = useState("");
-  const [active, setActive] = useState<Conversation>(), [answer, setAnswer] = useState<AgentAnswer>(), [reviewed, setReviewed] = useState<Approval>();
+  const [active, setActive] = useState<Conversation>(), [answer, setAnswer] = useState<AgentRunResult>(), [reviewed, setReviewed] = useState<Approval>();
   const conversations = usePage(api.conversations), approvals = usePage(api.approvals), write = usePendingWrite();
   const locked = write.busy || !!write.confirm;
   useEffect(() => { void write.run(() => conversations.load(), conversationError); }, [api]);
@@ -72,11 +72,16 @@ export function AssistantScreen({ api, back }: { api: Assistant; back: () => voi
       {active && <><ReportText role="header">{active.title || "Conversación sin título"}</ReportText>
         <PlanningField label="Mensaje" value={message} change={setMessage} busy={locked} />
         <AuthAction label="Enviar mensaje" disabled={locked} action={() => void write.run(async (permit) => {
-          setAnswer(undefined); setAnswer(await api.send(active.id, message, permit)); setMessage("");
+          setAnswer(undefined);
+          const result = await api.send(active.id, message, permit);
+          setAnswer(result);
+          if (result.status === "completed") setMessage("");
         }, "No pudimos enviar el mensaje.")} />
       </>}
-      {answer?.text && <ReportText>{answer.text}</ReportText>}
-      {answer?.needsApproval && <AuthAction label="Revisar propuesta" disabled={locked} action={() => {
+      {answer?.status === "failed" && <><ReportText role="alert">No pudimos enviar el mensaje.</ReportText>
+        {answer.message && <ReportText>{answer.message}</ReportText>}</>}
+      {answer?.status === "completed" && answer.text && <ReportText>{answer.text}</ReportText>}
+      {answer?.status === "completed" && answer.needsApproval && <AuthAction label="Revisar propuesta" disabled={locked} action={() => {
         if (answer.approvalId) void write.run(() => inspect(answer.approvalId!), detailError);
         else showApprovals();
       }} />}

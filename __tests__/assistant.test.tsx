@@ -109,3 +109,33 @@ test("the creator-only detail path can reject without the collection; a revoked 
   expect(await screen.findByText("No pudimos verificar la propuesta.")).toBeTruthy();
   expect((send as unknown as jest.Mock).mock.calls.map(([url]) => new URL(url).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
 });
+
+// Reviewer regression (verify mwtk0xwr). Append to __tests__/assistant.test.tsx.
+test("an acknowledged run_failed does not pin a later explicit send to the failed run", async () => {
+  setup();
+  const mock = send as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  const keys: string[] = [];
+  mock.mockImplementation(async (url: string, options: RequestInit) => {
+    if (new URL(url).pathname !== messages) return normal(url, options);
+    const key = new Headers(options.headers).get("Idempotency-Key")!;
+    keys.push(key);
+    if (key !== keys[0]) return stream();
+    const ended = {
+      type: "run_failed", runId: conversation, timestamp: at,
+      data: { message: "Provider unavailable" },
+    };
+    return new Response(`event: run_failed\ndata: ${JSON.stringify(ended)}\n\n`, {
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  await render(<Index />); await press("Asistente");
+  await screen.findByText("No hay conversaciones.");
+  await press("Crear conversación"); await screen.findByLabelText("Mensaje");
+  await change("Mensaje", ask); await press("Enviar mensaje");
+  await screen.findByText("No pudimos enviar el mensaje.");
+  expect(keys).toHaveLength(1);
+  await press("Enviar mensaje");
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).not.toBe(keys[0]);
+  expect(await screen.findByText(answer)).toBeTruthy();
+});

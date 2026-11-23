@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,32 +31,12 @@ function normalizeEscapes(text) {
   });
 }
 
-const pickerSources = new Set(["src/mobile-shell/image-picker-source.ts", "src/mobile-shell/document-picker-source.ts"]);
-const printer = ts.createPrinter({ removeComments: true });
-const parse = (path, text) => ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
-const print = (node, tree) => printer.printNode(ts.EmitHint.Unspecified, node, tree);
-const pickerCleanup = parse("picker.ts", `import type * as PickerCache from "expo-file-system";
-function releasePickerCopy({ uri, file }: PickerAsset) {
-  if (file || !uri.startsWith("file:///")) return;
-  const { File, Paths } = require("expo-file-system") as typeof PickerCache;
-  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
-}`);
-
-function persistenceSource(path, text) {
-  if (!pickerSources.has(path)) return text;
-  const tree = parse(path, text);
-  // Match complete statements, not substrings: neither the module nor the File or Paths binding can escape the function.
-  const allowed = pickerCleanup.statements.map((statement) => {
-    const matches = tree.statements.filter((candidate) => print(candidate, tree) === print(statement, pickerCleanup));
-    return matches.length === 1 ? matches[0] : null;
-  });
-  if (allowed.some((statement) => !statement) || tree.parseDiagnostics.length) return text;
-  let remainder = text;
-  for (const statement of allowed.sort((a, b) => b.pos - a.pos)) {
-    remainder = remainder.slice(0, statement.getStart(tree)) + "\n" + remainder.slice(statement.end);
-  }
-  return remainder;
-}
+// Pin the reviewed adapters (LF SHA-256), including the temp-root predicates and the
+// call sites that pass SDK-returned assets; pinning the delete statement alone proves neither.
+const pickerSources = new Map([
+  ["src/mobile-shell/image-picker-source.ts", "d45776fa8d6e1ac58377e611619c765ab47373acdaebc0abc8e1e3f4ced709c9"],
+  ["src/mobile-shell/document-picker-source.ts", "cebc63c56d28b6c4e1bd2e30a6f7946da70dfd362034936e8435c883f367ec94"],
+]);
 
 function findInsecureUrl(path, text) {
   const tree = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
@@ -92,7 +73,9 @@ export async function audit(target = root, parent = join(target, "..")) {
     )) reject("Supabase outside auth");
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
-    if ((appCode || appDependency) && plainStorage.test(persistenceSource(path, text))) reject("unapproved persistence");
+    const pickerDigest = pickerSources.get(path);
+    if (pickerDigest ? createHash("sha256").update(source.replace(/\r\n/g, "\n")).digest("hex") !== pickerDigest
+      : (appCode || appDependency) && plainStorage.test(text)) reject("unapproved persistence");
     if (/\bexpo-sqlite\b/i.test(text)) {
       if (appCode && path !== "src/foundation/offline-db.ts") reject("unapproved persistence");
       if (appDependency || appCode) sqlite = true;
