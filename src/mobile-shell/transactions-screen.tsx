@@ -155,7 +155,8 @@ export function TransactionsScreen({ api, bulk, back, startCreating = false, nex
       if (cursor && (result.items.some(({ id }) => page.items.some((row) => row.id === id)) || (result.nextCursor && seen.current.has(result.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor); else seen.current.clear();
       setApplied(filters);
-      setPage({ items: [...(cursor ? page.items : []), ...result.items], nextCursor: result.nextCursor });
+      setPage({ items: [...(cursor ? page.items : []), ...result.items], nextCursor: result.nextCursor,
+        fromCache: result.fromCache || (cursor ? page.fromCache : undefined) });
     } catch (failure) {
       if (sequence.current !== operation) return;
       const invalid = failure instanceof InvalidDraft;
@@ -180,14 +181,14 @@ export function TransactionsScreen({ api, bulk, back, startCreating = false, nex
   if (picker) return <AuthPanel><Picker api={view.api()} field={picker} back={() => { view.move(); setPicker(undefined); }} choose={(id, name) => {
     view.move(); setSelected((old) => ({ ...old, [picker]: name })); change(picker, id); setPicker(undefined);
   }} /></AuthPanel>;
-  if (bulk && selecting) return <TransactionBulkPanel api={bulk} items={page.items} back={() => selectBulk(false)} loading={busy}
+  if (bulk && selecting && !page.fromCache) return <TransactionBulkPanel api={bulk} items={page.items} back={() => selectBulk(false)} loading={busy}
     more={page.nextCursor && !error ? () => void load(applied, page.nextCursor!, true) : undefined} finish={(text, conflict) => {
       selectBulk(false); setBulkNotice({ text, conflict }); void load(applied, undefined, true);
     }} />;
   return <AuthPanel>
     <Copy role="header">Movimientos</Copy><AuthAction label="Volver al resumen" action={back} />
     <AuthAction label="Nuevo movimiento" action={() => { write.clear(); create(true); }} disabled={busy} />
-    {bulk && page.items.some(({ version }) => version !== null) && <AuthAction label="Acciones en lote" disabled={busy} action={() => { setBulkNotice(undefined); selectBulk(true); }} />}
+    {bulk && !page.fromCache && page.items.some(({ version }) => version !== null) && <AuthAction label="Acciones en lote" disabled={busy} action={() => { setBulkNotice(undefined); selectBulk(true); }} />}
     {bulkNotice && <Copy role={bulkNotice.conflict ? "alert" : undefined}>{bulkNotice.text}</Copy>}
     {write.error && <Copy role="alert">{write.error}</Copy>}
     <AuthAction label="Filtros" selected={showFilters} action={() => toggleFilters(!showFilters)} />

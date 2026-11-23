@@ -173,7 +173,12 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
                  WHERE principal = ? AND profile = ? AND workspace = ? AND path = ? AND json_extract(snapshot, '$.active.id') = ?`,
                 owner, profile, workspace, key, workspace);
             }));
-            if (row && await current()) { onSnapshot(row.saved_at); return JSON.parse(row.payload) as unknown; }
+            if (row && await current()) {
+              const cached: unknown = JSON.parse(row.payload);
+              onSnapshot(row.saved_at);
+              options?.onCacheHit?.();
+              return cached;
+            }
           }
           throw error;
         }

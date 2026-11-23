@@ -82,3 +82,44 @@ test("a lost bulk reply retains only a memory retry key, and revoked membership 
   await press("Aplicar a 1 movimiento"); await screen.findByText("Este espacio ya no está disponible.");
   expect(f.requests).toHaveLength(2); expect(f.effects.size).toBe(1);
 });
+
+// Reviewer regression (verify mwtv01w4). __tests__/transaction-bulk.test.tsx (append).
+test("cached movements cannot be the source of an online-only bulk preview", async () => {
+  const f = setup(); const { unmount } = await render(<Index />);
+  await press("Movimientos"); await screen.findByRole("button", { name: "Café" }); await unmount();
+  jest.mocked(send).mockRejectedValue(new Error("offline"));
+  await render(<Index />); await press("Movimientos"); await screen.findByRole("button", { name: "Café" });
+  const bulk = screen.queryByRole("button", { name: "Acciones en lote" });
+  if (bulk && !bulk.props.accessibilityState?.disabled) await fireEvent.press(bulk);
+  expect(screen.queryByRole("button", { name: "Seleccionar: Café" })).toBeNull();
+  expect(f.requests).toEqual([]);
+});
+
+test("bulk validation refuses repeated targets, over-limit lists and missing versions before dispatch", async () => {
+  const f = setup();
+  const { createBulkTransactions } = require("../src/foundation/transaction-bulk") as typeof import("../src/foundation/transaction-bulk");
+  const request = jest.fn(), api = createBulkTransactions(request, space, jest.fn());
+  const target = { id: one, expectedVersion: 2 };
+  const oversized = Array.from({ length: 101 }, (_, n) => ({
+    id: `fade0000-0000-4000-8000-${String(n).padStart(12, "0")}`, expectedVersion: 1,
+  }));
+  for (const targets of [[], [target, target], [{ ...target, expectedVersion: 0 }], oversized]) {
+    await expect(api.apply(targets, { type: "archive" })).rejects.toThrow("Revisa la selección y la acción del lote.");
+  }
+  expect(request).not.toHaveBeenCalled(); expect(f.requests).toEqual([]); expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});
+
+test("a refused conversion keeps the versioned preview and does not change stored state", async () => {
+  const f = setup({ failure: 422 }); await chooseTwo();
+  await press("Convertir importados"); await press("Ingreso"); await press("Revisar lote");
+  const { offlineStore } = require("../src/foundation/offline-db") as typeof import("../src/foundation/offline-db");
+  const hash = () => offlineStore()(async (db) => require("node:crypto").createHash("sha256").update(JSON.stringify([
+    await db.getAllAsync("SELECT * FROM cache ORDER BY rowid"), await db.getAllAsync("SELECT * FROM outbox ORDER BY id"),
+  ])).digest("hex"));
+  const before = await hash(); jest.mocked(Storage.setItemAsync).mockClear();
+  expect(f.requests).toEqual([]); await press("Aplicar a 2 movimientos");
+  await screen.findByText("El lote contiene movimientos no aptos para esta acción. No se aplicaron cambios.");
+  expect(f.requests).toEqual([{ body: { targets: [{ id: one, expectedVersion: 2 }, { id: two, expectedVersion: 3 }],
+    action: { type: "convertImported", targetType: "income" } }, key: expect.any(String) }]);
+  expect(f.effects.size).toBe(0); expect(await hash()).toBe(before); expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});

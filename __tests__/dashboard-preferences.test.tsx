@@ -87,3 +87,36 @@ test.each([404, 501])("unavailable preferences route (%s) leaves the normal dash
   await press("Personalizar resumen"); await screen.findByText("Esta función no está disponible en este servidor.");
   expect(screen.queryByRole("button", { name: "Guardar preferencias" })).toBeNull(); expect(f.requests).toEqual([]);
 });
+
+test("a saved month still starts on the first UTC day of the current month", async () => {
+  jest.useFakeTimers({ now: new Date("2026-11-01T00:00:00Z"), doNotFake: ["performance"] });
+  try {
+    const f = setup(), normal = jest.mocked(send).getMockImplementation()!;
+    jest.mocked(send).mockImplementation(async (...args) => {
+      const response = await normal(...args);
+      if (new URL(String(args[0])).pathname !== path) return response;
+      const body = await response.json() as object;
+      return Object.assign(response, { json: async () => ({ ...body, period: { preset: "this_month" } }) });
+    });
+    await dashboard(); await screen.findByText("Patrimonio neto: 1,00 USD");
+    expect(screen.getByText(/No pudimos verificar la zona horaria.*UTC/)).toBeTruthy();
+    expect(f.queries).toEqual(["from=2026-11-01&to=2026-11-01&presentationCurrency=USD"]);
+  } finally { jest.useRealTimers(); }
+});
+
+// Reviewer regression (verify mwtv01w4). __tests__/dashboard-preferences.test.tsx (append).
+test.each([["this_quarter", "2026-10-01"], ["this_year", "2026-01-01"]])("honors a saved %s in UTC when workspace time zone is unavailable", async (preset, from) => {
+  jest.useFakeTimers({ now: new Date("2026-11-25T12:00:00Z"), doNotFake: ["performance"] });
+  try {
+    const f = setup(), normal = jest.mocked(send).getMockImplementation()!;
+    jest.mocked(send).mockImplementation(async (...args) => {
+      const response = await normal(...args);
+      if (new URL(String(args[0])).pathname !== path) return response;
+      const body = await response.json() as object;
+      return Object.assign(response, { json: async () => ({ ...body, period: { preset } }) });
+    });
+    await dashboard(); await screen.findByText("Patrimonio neto: 1,00 USD");
+    expect(screen.getByText(/No pudimos verificar la zona horaria.*UTC/)).toBeTruthy();
+    expect(f.queries[0]).toBe(`from=${from}&to=2026-11-25&presentationCurrency=USD`);
+  } finally { jest.useRealTimers(); }
+});

@@ -15,7 +15,7 @@ export function SessionsScreen({ api, back, signOutAll }: { api: Sessions; back:
   }, "No pudimos cargar las sesiones.");
   useEffect(() => load(), [api]);
   const close = () => void run(async () => {
-    if (closing === "all") { await api.verify(); await signOutAll(); return; }
+    if (closing === "all") { await signOutAll(); return; }
     if (closing !== "others") return;
     await api.closeOthers(); setClosing(undefined); setClosed(true); setPage(undefined);
     setPage(await api.list());

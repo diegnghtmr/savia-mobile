@@ -132,3 +132,37 @@ test("registers with a protected password field and shows email confirmation wit
   expect(auth.signUp).toHaveBeenCalledWith(input.email, input.password);
   expect(send).not.toHaveBeenCalled();
 });
+
+// Reviewer regression (verify mwtv01w4). __tests__/auth.test.tsx (append).
+test.each([204, 503])("close-all reconciles the UI with the installed SDK session after logout HTTP %s", async (status) => {
+  const actual = jest.requireActual<typeof import("@supabase/supabase-js")>("@supabase/supabase-js");
+  const secure = new Map<string, string>();
+  jest.mocked(SecureStore.getItemAsync).mockImplementation(async (key) => secure.get(key) ?? null);
+  jest.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => { secure.delete(key); });
+  let key = "";
+  client.mockImplementation((url, publicKey, options) => {
+    key = options!.auth!.storageKey!;
+    secure.set(key, JSON.stringify({ ...session, expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { id: "00000000-0000-4000-8000-000000000001" } }));
+    for (const suffix of ["-code-verifier", "-user"]) secure.set(key + suffix, "synthetic-fixture");
+    return actual.createClient(url, publicKey, options);
+  });
+  const network = jest.mocked((require("expo/fetch") as typeof import("expo/fetch")).fetch);
+  network.mockResolvedValue(new Response(status === 204 ? null : '{"code":"unexpected_failure","message":"unavailable"}',
+    { status, headers: { "Content-Type": "application/json" } }) as unknown as Awaited<ReturnType<typeof network>>);
+  const auth = createAuth(origin, "sb_publishable_fixture"), failure = jest.fn();
+  const identity = { bootstrap: async () => {
+    if (!await auth.readSession()) return null;
+    const id = "00000000-0000-4000-8000-000000000001", item = { id, name: "Casa" };
+    return { profileId: id, items: [item], active: item };
+  } } as Parameters<typeof AuthGate>[0]["identity"];
+  await render(<AuthGate auth={() => auth} identity={identity} home={(_, __, closeAll) =>
+    <Text onPress={() => void closeAll().catch(failure)}>Confirmar cierre global</Text>} />);
+  await fireEvent.press(await screen.findByText("Confirmar cierre global"));
+  expect(network.mock.calls.map(([url]) => String(url))).toEqual([`${origin}/auth/v1/logout?scope=global`]);
+  expect(await auth.readSession()).toBeNull();
+  expect([...secure.keys()].filter((id) => id.startsWith(key))).toEqual([]);
+  expect(failure).toHaveBeenCalledTimes(status === 503 ? 1 : 0);
+  expect(await screen.findByText("Iniciar sesión")).toBeTruthy();
+  expect(screen.queryByText("Confirmar cierre global")).toBeNull();
+});

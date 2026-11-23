@@ -158,3 +158,56 @@ test("keeps category absence distinct from a malformed amount or foreign currenc
   const foreign = setup(); foreign.mixed(); await expect(foreign.api.breakdown(period)).rejects.toThrow();
   const malformed = setup(); malformed.invalid(); await expect(malformed.api.breakdown(period)).rejects.toThrow();
 });
+
+// Reviewer regression (verify mwtv01w4). __tests__/analytics-breakdown.test.tsx (append).
+test("dashboard shows the applied FX rates from the upcoming calendar response", async () => {
+  const f = setup(), normal = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (url, init) => {
+    const response = await normal(url, init), { searchParams } = new URL(url);
+    if (searchParams.get("metric") !== "financial_calendar") return response;
+    return { ...response, json: async () => ({ ...(await response.json() as object), fxRatesUsed: [
+      { baseCurrency: "USD", quoteCurrency: "KWD", rate: "0.307000", rateDate: "2026-11-01", source: "manual", freshness: "unknown" },
+    ], data: { periodStart: searchParams.get("from"), periodEnd: searchParams.get("to"), totalExpectedInflowMinor: "0", totalExpectedOutflowMinor: "3070",
+      debtsWithoutScheduledAmount: 0, recurringRulesWithUnreadableTemplate: 0, days: [{ date: "2026-11-02", expectedInflowMinor: "0", expectedOutflowMinor: "3070",
+        items: [{ kind: "recurring_rule", refId: id(4), label: "Cuota", state: "scheduled", direction: "outflow", amountMinor: "3070" }] }] } }) };
+  });
+  await render(<DashboardScreen api={f.api} back={jest.fn()} initial={period} now={new Date("2026-11-01T00:00:00Z")} />);
+  await screen.findByText(/Cuota: 3,070 KWD/);
+  expect(screen.getByText("USD → KWD · 0.307000 · 2026-11-01 · manual · Desconocida")).toBeTruthy();
+});
+
+test("all 12 authority metrics produce nonempty, typed result tables", () => {
+  const { advancedMetrics, parseAdvancedMetric } = require("../src/foundation/advanced-analytics") as typeof import("../src/foundation/advanced-analytics");
+  const day = "2026-10-01", range = { periodStart: day, periodEnd: day }, month = { month: day };
+  const zero = { currency: "KWD", amountMinor: "0" }, item = { subscriptionId: id(4), payeeName: "Ejemplo", currentAmount: zero };
+  const flow = { expectedInflowMinor: "12", expectedOutflowMinor: "0" };
+  const fixtures = {
+    net_worth_history: [{ series: [{ date: day, assets: zero, debts: zero, netWorth: zero, fxValuationChange: null }] }, "No disponible"],
+    spending_heatmap: [{ cells: [{ weekday: 1, dayOfMonth: 1, amount: zero, count: 0 }] }, "Lunes"],
+    recurring_vs_variable: [{ ...range, committedMinor: "12", variableMinor: "0", totalExpensesMinor: "12", committedPercent: null,
+      consideredSubscriptionCount: 1, unclassifiedSubscriptionCount: 0 }, "0,012 KWD"],
+    financial_calendar: [{ ...range, totalExpectedInflowMinor: "12", totalExpectedOutflowMinor: "0", debtsWithoutScheduledAmount: 0,
+      recurringRulesWithUnreadableTemplate: 0, days: [{ date: day, ...flow, items: [{ kind: "reminder", refId: id(4), label: "Aviso", state: "scheduled", direction: "none", amountMinor: null }] }] }, "Aviso (previsto, sin importe)"],
+    weekday_heatmap: [{ series: Array.from({ length: 7 }, (_, i) => ({ weekday: i + 1, transactionCount: 0, totalMinor: "0" })) }, "Domingo"],
+    balance_projection: [{ openingBalanceMinor: "0", basisMonths: 0, meanMonthlyIncomeMinor: "0", meanMonthlyExpensesMinor: "0",
+      months: [{ ...month, ...flow, projectedBalanceMinor: "12" }] }, "0,012 KWD"],
+    quarterly_average_comparison: [{ series: [{ quarter: "2026-Q4", monthsCounted: 1, averageMonthlyIncomeMinor: "12", averageMonthlyExpensesMinor: "0",
+      averageMonthlySavingsCapacityMinor: "12", savingsCapacityDeltaPercentVsPreviousQuarter: null }] }, "2026-Q4"],
+    subscription_price_increases: [{ items: [{ ...item, previousAmount: zero, increasePercent: 25 }], consideredCount: 1,
+      decreasedOrUnchangedCount: 0, excludedForCurrencyMismatch: 0, excludedForZeroPrevious: 0 }, "25 %"],
+    income_stability: [{ monthsCounted: 0, meanMonthlyIncomeMinor: "0", minMonthlyIncomeMinor: "0", maxMonthlyIncomeMinor: "0", medianMonthlyIncomeMinor: "0",
+      coefficientOfVariationPercent: null, trendPercent: null, regularityPercent: null, sourceConcentration: [{ payeeId: null, amount: zero, sharePercent: 0 }] }, "Sin identificar"],
+    monthly_savings_capacity: [{ series: [{ ...month, incomeMinor: "12", expensesMinor: "0", savingsCapacityMinor: "12", recurringIncomeMinor: "0",
+      essentialExpensesMinor: "0", discretionaryExpensesMinor: "0", obligationsMinor: "0", currentSavingsMinor: "0" }] }, "0,012 KWD"],
+    debt_cost_evolution: [{ totalInterestMinor: "12", totalFeeMinor: "0", totalCostMinor: "12", debtOutlook: [{ debtId: id(5), estimatedFutureCost: null,
+      estimatedRemainingMonths: null }], series: [{ ...month, principalPaidMinor: "0", paymentsMinor: "12", interestMinor: "12", feeMinor: "0", totalCostMinor: "12" }] }, "No disponible"],
+    subscription_annual_cost: [{ items: [{ ...item, frequency: "monthly", annualCost: null }], totalAnnualCost: zero }, "No disponible"],
+  } as const;
+  expect(Object.keys(advancedMetrics).sort()).toEqual(Object.keys(fixtures).sort());
+  for (const metric of Object.keys(fixtures) as (keyof typeof fixtures)[]) {
+    const [data, expected] = fixtures[metric];
+    const result = parseAdvancedMetric({ metric, generatedAt: `${day}T00:00:00Z`, currency: "KWD", assumptions: [], missingData: [], data }, metric);
+    expect(result.tables.flatMap(({ rows }) => rows.flat())).toContain(expected);
+    for (const table of result.tables) expect(table.rows.every((row) => row.length === table.headers.length)).toBe(true);
+  }
+});

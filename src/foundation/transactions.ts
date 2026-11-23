@@ -190,8 +190,9 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
     },
     async list(input: unknown = {}, onlineOnly?: true) {
       const params = queryFor(input), path = `${endpoint}?${params}`;
-      const payload = onlineOnly ? await request(workspaceId, path, { successStatus: 200, onlineOnly }) : await get(path);
-      return parsePage(payload, (row) => ({ ...transaction(row), version: bulkVersion(object(row).version) }), params.get("cursor"));
+      const source: { fromCache?: true } = {};
+      const payload = await request(workspaceId, path, { successStatus: 200, onlineOnly, onCacheHit: () => { source.fromCache = true; } });
+      return { ...parsePage(payload, (row) => ({ ...transaction(row), version: bulkVersion(object(row).version) }), params.get("cursor")), ...source };
     },
     async detail(raw: unknown) {
       const id = uuid(raw);

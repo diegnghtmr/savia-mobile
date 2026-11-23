@@ -1,6 +1,6 @@
 import type { ScopedRequest } from "./accounts";
 import { fundRecord } from "./funds";
-import { InvalidDraft, workspaceUnavailable } from "./identity-draft";
+import { InvalidDraft } from "./identity-draft";
 import { onlineCapability } from "./online-capability";
 import { uuid } from "./workspace-context";
 
@@ -38,15 +38,6 @@ export function createSessions(request: ScopedRequest, workspace: string) {
     },
     async closeOthers() {
       await call(`${endpoint}/revoke-others`, { ...subject, method: "POST", successStatus: 204 }, unavailable);
-    },
-    async verify() {
-      try {
-        const { id } = fundRecord(await call(`/v1/workspaces/${scope}`, { ...subject, successStatus: 200 }, unavailable, []));
-        if (uuid(id) !== scope) throw new InvalidDraft(workspaceUnavailable);
-      } catch (error) {
-        if (error instanceof Error && error.message === workspaceUnavailable) throw new InvalidDraft(workspaceUnavailable);
-        throw error;
-      }
     },
   };
 }

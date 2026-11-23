@@ -38,6 +38,7 @@ type WorkspaceOptions = {
   subjectResource?: true;
   form?: object;
   onMembership?: (context: WorkspaceContext) => Promise<void>;
+  onCacheHit?: () => void;
   submit?: (profileId: string, operation: (key: string, dispatch?: { body: unknown }) => Promise<unknown>, serverDate: number | null) => Promise<unknown>;
 };
 export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unknown>;

@@ -162,13 +162,13 @@ export function createAnalytics(request: ScopedRequest, workspace: string, batch
       if (presentationCurrency !== undefined && !ACTIVE_CURRENCIES.has(presentationCurrency)) throw new InvalidDraft("Revisa la moneda de presentación.");
       return batch(async (get) => {
         const summary = await summaryFor(get, scope, period, presentationCurrency), metric = "financial_calendar";
-        const upcoming = await optionalSection(async () => {
-          const raw = await get(scope, `${reportsPath}/advanced?${new URLSearchParams({ ...future, metric, ...(presentationCurrency && { presentationCurrency }) })}`, { successStatus: 200 });
-          return scheduledRecurring(advancedData(raw, metric), future, summary.currency);
+        const calendar = await optionalSection(async () => {
+          const raw = reportRecord(await get(scope, `${reportsPath}/advanced?${new URLSearchParams({ ...future, metric, ...(presentationCurrency && { presentationCurrency }) })}`, { successStatus: 200 }));
+          return { upcoming: scheduledRecurring(advancedData(raw, metric), future, summary.currency), rates: parseFxRatesUsed(raw.fxRatesUsed) };
         });
         const subscriptions = await optionalSection(async () => subscriptionPreview(
           await get(scope, `/v1/subscriptions?limit=${subscriptionPreviewLimit}&status=detected`, { successStatus: 200 }), scope));
-        return { summary, future, upcoming, subscriptions };
+        return { summary, future, upcoming: calendar?.upcoming ?? null, calendarRates: calendar?.rates, subscriptions };
       });
     },
     async breakdown(input: unknown) {

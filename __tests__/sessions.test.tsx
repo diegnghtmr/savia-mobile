@@ -61,17 +61,41 @@ test("close all calls global sign-out before local sign-out and returns to sign-
   expect(screen.queryByText("Este teléfono")).toBeNull();
 });
 
-test("failed global sign-out and revoked membership do not sign out locally", async () => {
+test("failed global sign-out closes locally and shows a notice on the sign-in screen", async () => {
   const f = setup(); await open(); await screen.findByText("Sesión actual");
   mockSignOut.mockRejectedValueOnce(new Error("provider refused"));
-  await press("Cerrar todas las sesiones"); await press("Confirmar cierre"); await screen.findByText("No pudimos cerrar todas las sesiones.");
-  expect(mockSignOut.mock.calls).toEqual([["global"]]); expect(screen.queryByText("Iniciar sesión")).toBeNull();
-  f.remove(); await press("Confirmar cierre"); await screen.findByText("Este espacio ya no está disponible.");
-  expect(mockSignOut.mock.calls).toEqual([["global"]]); expect(f.calls).toEqual([["GET", root]]);
+  await press("Cerrar todas las sesiones"); await press("Confirmar cierre"); await screen.findByText("Iniciar sesión");
+  expect(screen.getByText("No pudimos cerrar todas las sesiones.")).toBeTruthy();
+  expect(mockSignOut.mock.calls).toEqual([["global"], []]); expect(f.calls).toEqual([["GET", root]]);
+  expect(screen.queryByText("Este teléfono")).toBeNull();
 });
 
 test.each([404, 501])("shows missing sessions route (%s) without rendering users as signed out", async (status) => {
   const f = setup(status); await open(); await screen.findByText("Esta función no está disponible en este servidor.");
   expect(f.calls).toEqual([["GET", root]]); expect(screen.queryByText("Iniciar sesión")).toBeNull();
   expect(screen.queryByRole("button", { name: "Cerrar las demás sesiones" })).toBeNull(); expect(mockSignOut).not.toHaveBeenCalled();
+});
+
+// Reviewer regression (verify mwtv01w4). __tests__/sessions.test.tsx (append; replace the part of the existing test expecting lost membership to block global logout).
+test("the account-level close-all is not blocked by loss of the selected workspace", async () => {
+  const f = setup(); await open(); await screen.findByText("Sesión actual");
+  await press("Cerrar todas las sesiones"); f.remove(); await press("Confirmar cierre");
+  await screen.findByText("Iniciar sesión");
+  expect(mockSignOut.mock.calls[0]).toEqual(["global"]);
+  expect(f.calls).toEqual([["GET", root]]);
+});
+
+test("session metadata does not display or store stray credential fields", async () => {
+  const f = setup(), normal = jest.mocked(send).getMockImplementation()!;
+  jest.mocked(send).mockImplementation(async (...args) => {
+    const response = await normal(...args);
+    if (new URL(String(args[0])).pathname !== root) return response;
+    const body = await response.json() as { items: object[] };
+    return Object.assign(response, { json: async () => ({ ...body, items: body.items.map((row) => ({
+      ...row, accessToken: "not-for-display-A", refreshToken: "not-for-display-B",
+    })) }) });
+  });
+  await open(); await screen.findByText("Este teléfono");
+  expect(screen.queryByText(/not-for-display-/)).toBeNull();
+  expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(f.calls).toEqual([["GET", root]]);
 });

@@ -100,16 +100,31 @@ export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: {
       await check();
     }, "No pudimos continuar. Verifica tus datos e inténtalo de nuevo.");
   }
+  const closeAllNotice = "No pudimos cerrar todas las sesiones.";
   const closeSessions = async (global = false) => {
+    let providerFailure: { error: unknown } | undefined;
     const close = async () => {
       const client = auth();
-      if (global) await client.signOut("global");
-      await client.signOut(); setContext(null); setRoute("sign-in");
+      if (global) {
+        try { await client.signOut("global"); }
+        catch (error) { providerFailure = { error }; }
+      }
+      try { await client.signOut(); }
+      catch (error) {
+        // The SDK can report a provider error after removing this device's session.
+        if (!global || await client.readSession()) throw error;
+      }
+      ++sequence.current;
+      setContext(null); setRoute("sign-in");
     };
     await (purgeAfterSignOut ? purgeAfterSignOut(close) : close());
+    if (providerFailure) {
+      setNotice(closeAllNotice);
+      throw providerFailure.error;
+    }
   };
   const signOut = () => void run(() => closeSessions(), "No pudimos cerrar la sesión.");
-  const signOutAll = () => run(() => closeSessions(true), "No pudimos cerrar todas las sesiones.", true);
+  const signOutAll = () => run(() => closeSessions(true), closeAllNotice, true);
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
   if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
     <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>
