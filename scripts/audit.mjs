@@ -30,6 +30,33 @@ function normalizeEscapes(text) {
   });
 }
 
+const pickerSources = new Set(["src/mobile-shell/image-picker-source.ts", "src/mobile-shell/document-picker-source.ts"]);
+const printer = ts.createPrinter({ removeComments: true });
+const parse = (path, text) => ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+const print = (node, tree) => printer.printNode(ts.EmitHint.Unspecified, node, tree);
+const pickerCleanup = parse("picker.ts", `import type * as PickerCache from "expo-file-system";
+function releasePickerCopy({ uri, file }: PickerAsset) {
+  if (file || !uri.startsWith("file:///")) return;
+  const { File, Paths } = require("expo-file-system") as typeof PickerCache;
+  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
+}`);
+
+function persistenceSource(path, text) {
+  if (!pickerSources.has(path)) return text;
+  const tree = parse(path, text);
+  // Match complete statements, not substrings: neither the module nor the File or Paths binding can escape the function.
+  const allowed = pickerCleanup.statements.map((statement) => {
+    const matches = tree.statements.filter((candidate) => print(candidate, tree) === print(statement, pickerCleanup));
+    return matches.length === 1 ? matches[0] : null;
+  });
+  if (allowed.some((statement) => !statement) || tree.parseDiagnostics.length) return text;
+  let remainder = text;
+  for (const statement of allowed.sort((a, b) => b.pos - a.pos)) {
+    remainder = remainder.slice(0, statement.getStart(tree)) + "\n" + remainder.slice(statement.end);
+  }
+  return remainder;
+}
+
 function findInsecureUrl(path, text) {
   const tree = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
   function check(node) {
@@ -65,10 +92,7 @@ export async function audit(target = root, parent = join(target, "..")) {
     )) reject("Supabase outside auth");
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
-    // This adapter alone may unlink SDK-owned temporary picks; other persistence rules still apply there.
-    const persistenceText = path === "src/mobile-shell/image-picker-source.ts"
-      ? text.replace('import type * as PickerCache from "expo-file-system";', '').replace('require("expo-file-system")', '') : text;
-    if ((appCode || appDependency) && plainStorage.test(persistenceText)) reject("unapproved persistence");
+    if ((appCode || appDependency) && plainStorage.test(persistenceSource(path, text))) reject("unapproved persistence");
     if (/\bexpo-sqlite\b/i.test(text)) {
       if (appCode && path !== "src/foundation/offline-db.ts") reject("unapproved persistence");
       if (appDependency || appCode) sqlite = true;

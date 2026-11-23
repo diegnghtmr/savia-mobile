@@ -66,3 +66,22 @@ test("chooses an image via the injected camera source and polls until exact OCR 
   expect(screen.queryByText(/raw-image-fixture/)).toBeNull(); expect(f.send.mock.calls.some(([url]) => url.endsWith(`/v1/receipts/${receipt}`))).toBe(true);
   await act(async () => { await view.unmount(); });
 });
+
+// Reviewer regression (verify mwstw4vi). Append to __tests__/receipts.test.tsx.
+test("stops automatic receipt checks after 30 attempts while OCR is still processing", async () => {
+  const f = setup();
+  jest.useFakeTimers();
+  try {
+    const view = await render(<ReceiptsScreen api={f.reopen()} back={jest.fn()} pollMs={2000} />);
+    await fireEvent.changeText(screen.getByLabelText("Identificador del recibo"), receipt);
+    await fireEvent.press(screen.getByRole("button", { name: "Consultar recibo" }));
+    const calls = () => f.send.mock.calls.filter(([url]) => new URL(url).pathname === `/v1/receipts/${receipt}`).length;
+    expect(calls()).toBe(1);
+    await act(async () => { await jest.advanceTimersByTimeAsync(60_000); });
+    expect(calls()).toBe(31);
+    expect(screen.getByText("El recibo sigue en proceso. Puedes actualizar su estado.")).toBeTruthy();
+    await act(async () => { await jest.advanceTimersByTimeAsync(120_000); });
+    expect(calls()).toBe(31);
+    await view.unmount();
+  } finally { jest.useRealTimers(); }
+});

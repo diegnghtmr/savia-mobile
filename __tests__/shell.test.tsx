@@ -42,7 +42,7 @@ jest.mock("expo-crypto", () => ({}));
 jest.mock("expo-document-picker", () => ({ getDocumentAsync: jest.fn() }));
 jest.mock("expo-image-picker", () => ({ requestCameraPermissionsAsync: jest.fn(), requestMediaLibraryPermissionsAsync: jest.fn(),
   launchCameraAsync: jest.fn(), launchImageLibraryAsync: jest.fn() }));
-jest.mock("expo-file-system", () => ({ Paths: { cache: { uri: "file:///private/cache/" } }, File: jest.fn() }));
+jest.mock("expo-file-system", () => ({ Paths: { cache: { uri: "file:///var/mobile/fixture/Library/Caches/" } }, File: jest.fn() }));
 jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: jest.fn(), deleteItemAsync: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ ...jest.requireActual("../src/foundation/transport"), createTransport: jest.fn() }));
 
@@ -131,7 +131,7 @@ const pressPicker = async (name: string) => fireEvent.press(await screen.findByR
 const pickerLimit = 5 * 1024 * 1024;
 const cancel = { canceled: true, assets: null } as const;
 const permission = { granted: true, canAskAgain: true, expires: "never", status: "granted" } as Awaited<ReturnType<typeof ImagePicker.requestCameraPermissionsAsync>>;
-const receiptUri = "file:///private/cache/ImagePicker/cb8e9033-5ec0-43f9-8253-5ee243d70c68.png";
+const receiptUri = "file:///var/mobile/fixture/Library/Caches/ImagePicker/cb8e9033-5ec0-43f9-8253-5ee243d70c68.png";
 const receiptAsset = { uri: receiptUri, width: 10, height: 10, fileName: "recibo.png", mimeType: "image/png", fileSize: 4 };
 
 function localBlob(blob: Blob) {
@@ -182,6 +182,34 @@ test("the default route picks one CSV without copying it, rejects a byte over th
   await pressPicker("Elegir extracto");
   await waitFor(() => expect(screen.queryByText(asset.name)).toBeNull());
   expect(request.open).toHaveBeenCalledTimes(1); expect(upload).toHaveBeenCalledTimes(1);
+});
+
+test("unlinks only the returned iOS copy after reading it or rejecting it", async () => {
+  const uri = "file:///private/var/mobile/fixture/tmp/co.savia.mobile-Inbox/extracto.csv";
+  const asset = { uri, name: "extracto.csv", lastModified: 0, size: 4 };
+  const { request } = localBlob(new Blob(["test"], { type: "text/csv" }));
+  const remove = jest.fn(), upload = jest.fn();
+  jest.mocked(LocalFile).mockImplementation(() => ({ delete: remove } as unknown as LocalFile));
+  jest.mocked(createImports).mockReturnValue({ upload, detail: jest.fn() });
+  jest.mocked(DocumentPicker.getDocumentAsync)
+    .mockResolvedValueOnce({ canceled: false, assets: [{ ...asset, size: pickerLimit + 1 }] })
+    .mockResolvedValueOnce({ canceled: false, assets: [asset] })
+    .mockResolvedValueOnce({ canceled: false, assets: [{ ...asset, uri: "file:///var/mobile/fixture/Documents/original.csv", size: pickerLimit + 1 }] });
+  await render(<Index />);
+  await pressPicker("Importar extractos");
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText("Elige un archivo CSV de hasta 5 MiB.")).toBeTruthy();
+  expect(request.open).not.toHaveBeenCalled();
+  expect(remove).toHaveBeenCalledTimes(1);
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText(asset.name)).toBeTruthy();
+  expect(request.open).toHaveBeenCalledWith("GET", uri);
+  expect(remove.mock.invocationCallOrder[1]).toBeGreaterThan(request.send.mock.invocationCallOrder[0]);
+  expect(jest.mocked(LocalFile).mock.calls).toEqual([[uri], [uri]]);
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText("Elige un archivo CSV de hasta 5 MiB.")).toBeTruthy();
+  expect(remove).toHaveBeenCalledTimes(2);
+  expect(upload).not.toHaveBeenCalled(); expect(createTransport).not.toHaveBeenCalled();
 });
 
 test.each([

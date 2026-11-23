@@ -34,14 +34,16 @@ async function pickImage(origin: ImageOrigin) {
   return picker.launchImageLibraryAsync(options);
 }
 
+function isPickerCopy(uri: string, cacheUri: string) {
+  // SDK 57 stages native images in its cache. Only delete its generated file, never a user original.
+  const root = cacheUri.replace(/\/?$/, "/");
+  return uri.startsWith(root) && /^(?:ImagePicker\/)?[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}(?:\.[\da-z]+)?$/i.test(uri.slice(root.length));
+}
+
 function releasePickerCopy({ uri, file }: PickerAsset) {
   if (file || !uri.startsWith("file:///")) return;
-  // SDK 57 stages native images in its cache. Only delete its generated file, never a user original.
   const { File, Paths } = require("expo-file-system") as typeof PickerCache;
-  const root = Paths.cache.uri.replace(/\/?$/, "/");
-  if (uri.startsWith(root) && /^(?:ImagePicker\/)?[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}(?:\.[\da-z]+)?$/i.test(uri.slice(root.length))) {
-    new File(uri).delete();
-  }
+  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
 }
 
 export const defaultReceiptSource = imagePickerSource({ camera: () => pickImage("camera"), gallery: () => pickImage("gallery") }, readLocalBlob, releasePickerCopy);

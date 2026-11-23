@@ -41,13 +41,28 @@ test("allows SQLite only behind its cipher adapter and the SQLCipher plugin", as
   await assert.rejects(audit(app), /SQLCipher plugin required/);
 });
 
-test("allows the receipt picker cache adapter without allowing other persistence there", async (t) => {
-  const path = "src/mobile-shell/image-picker-source.ts";
-  const allowed = 'import type * as PickerCache from "expo-file-system";\nconst { File } = require("expo-file-system") as typeof PickerCache;';
-  const app = await fixture(t, { [path]: allowed });
+const pickerPaths = ["src/mobile-shell/image-picker-source.ts", "src/mobile-shell/document-picker-source.ts"];
+const cleanup = `import type * as PickerCache from "expo-file-system";
+function releasePickerCopy({ uri, file }: PickerAsset) {
+  if (file || !uri.startsWith("file:///")) return;
+  const { File, Paths } = require("expo-file-system") as typeof PickerCache;
+  if (isPickerCopy(uri, Paths.cache.uri)) new File(uri).delete();
+}`;
+for (const path of pickerPaths) test(`allows only temporary-file cleanup in ${path}`, async (t) => {
+  const app = await fixture(t, { [path]: cleanup });
   await assert.doesNotReject(audit(app));
-  await writeFile(join(app, path), `${allowed}\nlocalStorage.setItem("x", "y");`);
-  await assert.rejects(audit(app), /unapproved persistence/);
+  for (const source of [
+    `${cleanup}\nlocalStorage.setItem("x", "y");`,
+    cleanup.replace("new File(uri).delete()", 'new File(uri).write("fixture")'),
+    cleanup.replace("new File(uri).delete()", "new File(uri).copy(File)"),
+    cleanup.replace("new File(uri).delete()", "new File(uri).move(File)"),
+    cleanup.replace("new File(uri).delete()", "new File(uri).create()"),
+    cleanup.replace("new File(uri).delete()", "new File(Paths.cache.uri).delete()"),
+    cleanup.replace("new File(uri).delete()", "new File(uri).delete(); new File(uri).create()"),
+  ]) {
+    await writeFile(join(app, path), source);
+    await assert.rejects(audit(app), { message: `${path}: unapproved persistence` });
+  }
 });
 
 test("audits the checked-out repository without an exact inventory", async () => {
@@ -115,3 +130,13 @@ for (const path of ["requirements.txt", "CMakeLists.txt", "proof.md", "proof.mdx
     await assert.rejects(audit(app), /generated or documentation-like executable path rejected/);
   });
 }
+
+// Reviewer regression (verify mwstw4vi). Append to scripts/audit.test.mjs.
+test("receipt picker audit exception does not allow writing image bytes", async (t) => {
+  const path = "src/mobile-shell/image-picker-source.ts";
+  const app = await fixture(t, {
+    [path]: 'const { File, Paths } = require("expo-file-system");\n' +
+      'new File(Paths.cache, "receipt.png").write("image bytes");',
+  });
+  await assert.rejects(audit(app), { message: `${path}: unapproved persistence` });
+});
