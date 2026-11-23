@@ -98,3 +98,57 @@ test.each([false, true])("catalog lost reply replays unless the backend clock is
   expect(f.writes[1]).toEqual({ ...f.writes[0], key: expired ? expect.not.stringMatching(f.writes[0].key!) : f.writes[0].key });
   expect(f.creations.size).toBe(expired ? 2 : 1);
 });
+
+// Reviewer regressions (verify mwts5k0k). Append to __tests__/catalog-writes.test.tsx.
+test("a denied catalog write leaves no pending retry record", async () => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    if (new URL(url).pathname !== "/v1/tags") return normal(url, init);
+    return { ok: false, status: 403, redirected: false, headers: new Headers(), json: async () => ({}) };
+  });
+  await open("Nueva etiqueta"); await enter("Casa");
+  const hash = () => require("node:crypto").createHash("sha256").update(JSON.stringify([...f.stored])).digest("hex");
+  const before = hash();
+  await press("Crear etiqueta");
+  expect(await screen.findByRole("alert")).toHaveTextContent("No tienes permiso para crear elementos en este espacio.");
+  expect(f.creations.size).toBe(0);
+  expect(screen.queryByText("Etiqueta creada.")).toBeNull();
+  expect(hash()).toBe(before);
+});
+
+test.each([
+  [401, "No pudimos crear el elemento. Vuelve a intentarlo."],
+  [404, "La creación de catálogos no está disponible en este servidor."],
+  [422, "No pudimos crear el elemento. Vuelve a intentarlo."],
+] as const)("catalog denial %s retires the key and leaves the draft available", async (status, message) => {
+  const f = setup(), normal = f.client.getMockImplementation()!, keys: (string | null)[] = [];
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    if (new URL(url).pathname !== "/v1/tags") return normal(url, init);
+    keys.push(new Headers(init.headers).get("Idempotency-Key"));
+    if (keys.length === 1) return { ok: false, status, redirected: false, headers: new Headers(), json: async () => ({}) };
+    return normal(url, init);
+  });
+  await open("Nueva etiqueta"); await enter("Casa"); const before = [...f.stored];
+  await press("Crear etiqueta"); expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  expect(f.creations.size).toBe(0); expect([...f.stored]).toEqual(before);
+  expect(screen.queryByText("Etiqueta creada.")).toBeNull(); expect(screen.getByLabelText("Nombre").props.value).toBe("Casa");
+  expect(keys).toEqual([expect.any(String)]);
+  await press("Crear etiqueta"); await screen.findByText("Etiqueta creada.");
+  expect(keys).toHaveLength(2); expect(keys[1]).not.toBe(keys[0]); expect(f.creations.size).toBe(1);
+  expect([...f.stored]).toEqual(before);
+});
+
+test.each([503, 201])("an uncertain catalog result (%s) keeps the key for replay", async (status) => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    if (new URL(url).pathname !== "/v1/tags" || f.writes.length !== 1) return response;
+    return { ...response, status, ok: status === 201, json: async () => ({}) };
+  });
+  await open("Nueva etiqueta"); await enter("Casa"); const before = [...f.stored];
+  await press("Crear etiqueta"); expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos crear el elemento. Vuelve a intentarlo.");
+  expect(screen.queryByText("Etiqueta creada.")).toBeNull(); expect(f.creations.size).toBe(1);
+  expect([...f.stored]).toHaveLength(before.length + 1);
+  await press("Crear etiqueta"); await screen.findByText("Etiqueta creada.");
+  expect(f.writes).toEqual([f.writes[0], f.writes[0]]); expect(f.creations.size).toBe(1); expect([...f.stored]).toEqual(before);
+});

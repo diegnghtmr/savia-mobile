@@ -106,3 +106,102 @@ test("an administrator cannot start a full backup", async () => {
   await screen.findByText("Solo el propietario puede crear y descargar copias completas.");
   expect(screen.queryByRole("button", { name: "Crear copia completa" })).toBeNull(); expect(f.posts).toEqual([]);
 });
+
+// Reviewer regressions (verify mwts5k0k). Append to __tests__/data-jobs.test.tsx.
+test.each([404, 501])("classifies a missing export status endpoint (%s) as unavailable", async (status) => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    return new URL(url).pathname === `/v1/export-jobs/${job}` ? { ...response, ok: false, status } : response;
+  });
+  await open(); await press("Exportar datos"); await press("Crear exportación");
+  await press("Actualizar estado");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Esta función no está disponible en este servidor.");
+  expect(openURL).not.toHaveBeenCalled();
+});
+
+test("a workspace with no saved definitions can still run the monthly preset", async () => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    if (new URL(url).pathname !== "/v1/report-definitions") return response;
+    return { ...response, json: async () => ({ items: [], pageInfo: { hasNextPage: false, nextCursor: null } }) };
+  });
+  await open();
+  fireEvent.press(await screen.findByRole("button", { name: /Resumen mensual/i }));
+  await press("Generar informe"); await screen.findByText("En cola");
+  expect(f.posts).toEqual([{ path: "/v1/report-runs", key: expect.any(String), body: { preset: "monthly_summary", format: "pdf" } }]);
+});
+
+test("the known unsupported generic report export is not presented as usable", async () => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    if (new URL(url).pathname !== "/v1/export-jobs" || JSON.parse(String(init.body)).resource !== "report") return response;
+    return { ...response, ok: false, status: 422, json: async () => ({ title: "Export resource unavailable" }) };
+  });
+  await open(); await press("Exportar datos");
+  const option = screen.queryByRole("button", { name: /^Informes$/ });
+  if (!option || option.props.accessibilityState?.disabled) return;
+  await fireEvent.press(option); await press("Crear exportación");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Esta función no está disponible en este servidor.");
+});
+
+test.each(["create", "poll"])("demotion blocks backup %s before the job request", async (phase) => {
+  const f = setup(); await open(); await press("Copia completa");
+  await screen.findByRole("button", { name: "Crear copia completa" });
+  if (phase === "poll") { await press("Crear copia completa"); await screen.findByText("En cola"); }
+  f.demote();
+  await press(phase === "create" ? "Crear copia completa" : "Actualizar estado");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Solo el propietario puede crear y descargar copias completas.");
+  expect(f.posts).toHaveLength(phase === "create" ? 0 : 1);
+  expect(f.reads).toEqual([]);
+  expect(openURL).not.toHaveBeenCalled();
+});
+
+test("backup download uses only the new HTTPS link and leaves cache and outbox unchanged", async () => {
+  const f = setup(); await open(); await press("Copia completa");
+  await press("Crear copia completa"); await press("Actualizar estado"); await screen.findByText("Completado");
+  const { offlineStore } = require("../src/foundation/offline-db") as typeof import("../src/foundation/offline-db");
+  const hash = () => offlineStore()(async (db) => require("node:crypto").createHash("sha256").update(JSON.stringify([
+    await db.getAllAsync("SELECT * FROM cache ORDER BY rowid"), await db.getAllAsync("SELECT * FROM outbox ORDER BY id"),
+  ])).digest("hex"));
+  const before = await hash();
+  expect(openURL).not.toHaveBeenCalled();
+  jest.mocked(Storage.setItemAsync).mockClear();
+  const fresh = "https://store.invalid/d/archive.zip?token=fixture-fresh";
+  f.setLink(fresh, date);
+  await press("Descargar archivo"); await screen.findByText("No hay un enlace de descarga vigente.");
+  expect(openURL).not.toHaveBeenCalled(); expect(await hash()).toBe(before);
+  f.setLink(fresh, "2026-11-25T00:15:00Z");
+  await press("Descargar archivo");
+  expect(openURL).toHaveBeenCalledTimes(1); expect(openURL).toHaveBeenCalledWith(fresh);
+  expect(await hash()).toBe(before); expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});
+
+test("only backend-supported export resources appear in the export form", async () => {
+  const f = setup(); await open(); await press("Exportar datos");
+  for (const name of ["Todos los datos", "Movimientos", "Cuentas"]) expect(screen.getByRole("button", { name })).toBeTruthy();
+  for (const name of ["Presupuestos", "Deudas", "Informes"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  expect(f.posts).toEqual([]); expect(openURL).not.toHaveBeenCalled();
+});
+
+test("offers every authority preset and switches from a saved definition without sending both selectors", async () => {
+  const f = setup(); await open(); await press("Informe: Mi resumen");
+  const labels = ["Resumen mensual", "Flujo de caja", "Gastos", "Ingresos", "Presupuesto", "Patrimonio neto", "Deudas",
+    "Fondos", "Espacio familiar", "Multimoneda", "Pronóstico", "Comparación de períodos"];
+  for (const label of labels) expect(screen.getByRole("button", { name: label })).toBeTruthy();
+  await press("Comparación de períodos"); await press("CSV"); await press("Generar informe"); await screen.findByText("En cola");
+  expect(f.posts).toEqual([{ path: "/v1/report-runs", key: expect.any(String), body: { preset: "period_comparison", format: "csv" } }]);
+});
+
+test.each([401, 403])("keeps an export status denial (%s) distinct from unavailability", async (status) => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    return new URL(url).pathname === `/v1/export-jobs/${job}` ? { ...response, ok: false, status } : response;
+  });
+  await open(); await press("Exportar datos"); await press("Crear exportación"); await press("Actualizar estado");
+  expect(await screen.findByRole("alert")).toHaveTextContent(status === 403 ? "No tienes permiso para realizar esta operación." : "No pudimos actualizar el estado del trabajo.");
+  expect(f.posts).toHaveLength(1); expect(openURL).not.toHaveBeenCalled();
+});

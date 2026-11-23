@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
-import { backupForbidden, exportFormats, inProgress, jobStatuses, reportFormats, resources, type DataJob, type DataJobs, type JobDraft, type JobKind } from "../foundation/data-jobs";
+import { backupForbidden, exportFormats, inProgress, jobStatuses, reportFormats, reportPresets, resources, type DataJob, type DataJobs, type JobDraft, type JobKind, type ReportSelection } from "../foundation/data-jobs";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { ReportText } from "./period-report";
 import { PlanningField } from "./planning-field";
 import { usePendingWrite } from "./use-pending-write";
 
 const pollInterval = 2000, maxPolls = 12;
-const labels = { report: "Informes guardados", export: "Exportar datos", backup: "Copia completa" } as const;
+const labels = { report: "Ejecutar informes", export: "Exportar datos", backup: "Copia completa" } as const;
 const createLabels = { report: "Generar informe", export: "Crear exportación", backup: "Crear copia completa" } as const;
 
 export function DataJobsScreen({ api, back }: { api: DataJobs; back: () => void }) {
@@ -23,7 +23,7 @@ export function DataJobsScreen({ api, back }: { api: DataJobs; back: () => void 
 function JobPanel({ api, kind }: { api: DataJobs; kind: JobKind }) {
   const [job, setJob] = useState<DataJob>(), [owner, setOwner] = useState<boolean>();
   const [page, setPage] = useState<Awaited<ReturnType<DataJobs["definitions"]>>>();
-  const [definitionId, select] = useState(""), [format, setFormat] = useState(kind === "report" ? "pdf" : "csv");
+  const [report, selectReport] = useState<ReportSelection>(), [format, setFormat] = useState(kind === "report" ? "pdf" : "csv");
   const [resource, setResource] = useState("all"), [from, setFrom] = useState(""), [to, setTo] = useState("");
   const { busy, error, run, confirm, clear } = usePendingWrite();
   const live = useRef(false), polls = useRef(0);
@@ -54,7 +54,9 @@ function JobPanel({ api, kind }: { api: DataJobs; kind: JobKind }) {
   }, [job, busy, error]);
 
   const start = () => {
-    const draft: JobDraft = kind === "report" ? { kind, definitionId, format } : kind === "export" ? { kind, format, resource, from, to } : { kind };
+    const draft: JobDraft | undefined = kind === "report" ? report && { kind, ...report, format }
+      : kind === "export" ? { kind, format, resource, from, to } : { kind };
+    if (!draft) return;
     void run(async (confirmation) => {
       const result = await api.start(draft, confirmation);
       if (live.current) { polls.current = 0; setJob(result); }
@@ -82,8 +84,10 @@ function JobPanel({ api, kind }: { api: DataJobs; kind: JobKind }) {
       {kind === "report" && <>
         {!page && <AuthAction label="Cargar informes" disabled={busy} action={() => load()} />}
         {page && !page.items.length && <ReportText>No hay informes guardados.</ReportText>}
-        {page?.items.map(({ id, name }) => <AuthAction key={id} label={`Informe: ${name}`} disabled={busy || id === definitionId} action={() => { clear(); select(id); }} />)}
+        {page?.items.map(({ id, name }) => <AuthAction key={id} label={`Informe: ${name}`} disabled={busy || id === report?.definitionId} action={() => { clear(); selectReport({ definitionId: id }); }} />)}
         {page?.next && <AuthAction label="Cargar más informes" disabled={busy} action={() => load(page.next!)} />}
+        <ReportText>Preajustes de informes</ReportText>
+        {choices(reportPresets, report?.preset ?? "", (preset) => selectReport({ preset }))}
       </>}
       {kind !== "backup" && choices(formats, format, setFormat)}
       {kind === "export" && <>
@@ -93,7 +97,7 @@ function JobPanel({ api, kind }: { api: DataJobs; kind: JobKind }) {
       </>}
       {kind === "backup" && owner === false && <ReportText>{backupForbidden}</ReportText>}
       {kind === "backup" && owner === undefined && <AuthAction label="Verificar permiso" disabled={busy} action={checkOwner} />}
-      {(kind !== "backup" || owner === true) && <AuthAction label={createLabels[kind]} disabled={busy || (kind === "report" && !definitionId)} action={start} />}
+      {(kind !== "backup" || owner === true) && <AuthAction label={createLabels[kind]} disabled={busy || (kind === "report" && !report)} action={start} />}
     </>}
   </View>;
 }

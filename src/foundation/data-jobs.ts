@@ -9,8 +9,14 @@ import { TransportError } from "./transport";
 import { uuid } from "./workspace-context";
 
 export const reportFormats = { json: "JSON", csv: "CSV", pdf: "PDF" } as const;
+export const reportPresets = {
+  monthly_summary: "Resumen mensual", cash_flow: "Flujo de caja", expenses: "Gastos", income: "Ingresos",
+  budget: "Presupuesto", net_worth: "Patrimonio neto", debts: "Deudas", funds: "Fondos", family_workspace: "Espacio familiar",
+  multi_currency: "Multimoneda", forecast: "Pronóstico", period_comparison: "Comparación de períodos",
+} as const;
 export const exportFormats = { csv: "CSV", json_backup: "Respaldo JSON", xlsx: "Excel (XLSX)" } as const;
-export const resources = { all: "Todos los datos", transactions: "Movimientos", accounts: "Cuentas", budgets: "Presupuestos", debts: "Deudas", report: "Informes" } as const;
+// The schema also declares budgets, debts, and report, but the export service rejects those resources.
+export const resources = { all: "Todos los datos", transactions: "Movimientos", accounts: "Cuentas" } as const;
 export const jobStatuses = { queued: "En cola", processing: "En proceso", completed: "Completado", failed: "Fallido" } as const;
 const paths = { report: "/v1/report-runs", export: "/v1/export-jobs", backup: "/v1/backup-jobs" } as const;
 const unavailable = "Esta función no está disponible en este servidor.";
@@ -20,7 +26,8 @@ const noLink = "No hay un enlace de descarga vigente.";
 export type JobKind = keyof typeof paths;
 export type DataJob = Readonly<{ id: string; kind: JobKind; status: keyof typeof jobStatuses; format?: string }>;
 export const inProgress = (job: DataJob) => job.status === "queued" || job.status === "processing";
-export type JobDraft = { kind: "report"; definitionId: string; format: string } |
+export type ReportSelection = { definitionId: string; preset?: never } | { preset: string; definitionId?: never };
+export type JobDraft = ({ kind: "report"; format: string } & ReportSelection) |
   { kind: "export"; format: string; resource: string; from: string; to: string } | { kind: "backup" };
 
 function member<T extends object>(set: T, value: unknown): value is keyof T {
@@ -76,9 +83,10 @@ export function createDataJobs(request: ScopedRequest, workspace: string, journa
     return withJob(job.kind, async () => {
       let serverDate: number | null = null;
       const started = performance.now();
+      const missing = job.kind === "backup" || (job.kind === "export" && !download) ? [404, 501] : [501];
       const raw = await call(`${paths[job.kind]}/${job.id}`, { onlineOnly: true, successStatus: 200,
         ...(download ? { onResponseDate: (date: number | null) => { serverDate = date; } } : {}) },
-      job.kind === "backup" ? backupUnavailable : unavailable, job.kind === "backup" ? [404, 501] : [501]);
+      job.kind === "backup" ? backupUnavailable : unavailable, missing);
       const current = parseJob(raw, job.kind, job.format);
       if (current.id !== job.id) throw new TypeError("Unexpected data job");
       const { downloadUrl, expiresAt } = fundRecord(raw);
@@ -90,8 +98,12 @@ export function createDataJobs(request: ScopedRequest, workspace: string, journa
   function payload(draft: JobDraft) {
     if (draft.kind === "backup") return undefined;
     if (draft.kind === "report") {
-      if (!rows.has(draft.definitionId) || !member(reportFormats, draft.format)) throw new InvalidDraft("Selecciona un informe y un formato.");
-      return { definitionId: draft.definitionId, format: draft.format };
+      const { definitionId, preset, format } = draft;
+      if (member(reportFormats, format)) {
+        if (preset === undefined && typeof definitionId === "string" && rows.has(definitionId)) return { definitionId, format };
+        if (definitionId === undefined && member(reportPresets, preset)) return { preset, format };
+      }
+      throw new InvalidDraft("Selecciona un informe y un formato.");
     }
     const from = draft.from.trim(), to = draft.to.trim();
     if (!member(exportFormats, draft.format) || !member(resources, draft.resource) ||

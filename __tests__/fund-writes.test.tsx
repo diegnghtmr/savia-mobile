@@ -302,3 +302,21 @@ test("an expired opaque withdrawal retry after reopen preserves the balance unti
   expect(f.pending()).toEqual([]); expect(f.replay.size).toBe(2);
   expect((await f.api.detail(fund))?.saved).toBe("7,500 KWD");
 });
+
+// Reviewer regressions (verify mwts5k0k). Append to __tests__/fund-writes.test.tsx.
+test("a reopened withdrawal still replays one second before 23 hours on backend time", async () => {
+  const f = setup(true), first = f.connect();
+  const draft = { accountId: account, amount: "1.250", reason: "Reparación del baño" };
+  await first.loadAccounts(); f.lose();
+  await expect(first.withdraw(fund, "KWD", draft)).rejects.toThrow(/Necesitas conexión/);
+  f.advance(23 * hours - 1000);
+  const clock = jest.spyOn(Date, "now").mockReturnValue(Date.UTC(2030, 0, 1));
+  try {
+    const reopened = f.connect(); await reopened.loadAccounts();
+    await expect(reopened.withdraw(fund, "KWD", draft)).resolves.toBeUndefined();
+    expect(f.writes[1]).toEqual(f.writes[0]);
+    expect(f.replay.size).toBe(1);
+    expect((await f.api.detail(fund))?.saved).toBe("8,750 KWD");
+    expect(f.pending()).toEqual([]);
+  } finally { clock.mockRestore(); }
+});

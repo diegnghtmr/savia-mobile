@@ -14,6 +14,7 @@ export const catalogLabels = {
   tags: { form: "Nueva etiqueta", create: "Crear etiqueta", saved: "Etiqueta creada.", duplicate: "Ya existe una etiqueta con ese nombre en este espacio." },
 } as const;
 export type Catalog = keyof typeof catalogLabels;
+const definitiveDenials = [401, 403, 404, 409, 422];
 
 function parseDraft(catalog: Catalog, input: unknown): { name: string; kind?: string; essential?: true } {
   const category = catalog === "categories";
@@ -36,22 +37,29 @@ export function createCatalogWrites(request: ScopedRequest, workspace: string) {
     const body = parseDraft(catalog, input), path = `/v1/${catalog}`, method = "POST";
     try {
       const result = await call(path, { method, body, successStatus: 201, onlineOnly: true,
-        submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, JSON.stringify([method, path, body]), async (key) => {
-          const response = await operation(key).catch((error: unknown) => {
-            if (error instanceof TransportError && error.kind === "http" && error.status === 409) return error;
-            throw error;
-          });
-          if (response instanceof TransportError) return response;
-          const { id: raw, name, kind, essential, archived } = fundRecord(response), id = uuid(raw);
-          if (!id || name !== body.name || archived === true || (catalog === "categories" && ((kind !== undefined && kind !== body.kind) ||
-            (essential ?? false) !== (body.essential ?? false)))) throw new TypeError("Invalid catalog receipt");
-          return id;
-        }, { serverDate, confirmation }) }, "La creación de catálogos no está disponible en este servidor.");
-      if (result instanceof TransportError) throw new InvalidDraft(catalogLabels[catalog].duplicate);
+        submit: async (profile, operation, serverDate) => {
+          const outcome = await pendingSubmission(scope, profile, JSON.stringify([method, path, body]), async (key) => {
+            const response = await operation(key).catch((error: unknown) => {
+              if (error instanceof TransportError && error.kind === "http" && definitiveDenials.includes(error.status ?? 0)) return error;
+              throw error;
+            });
+            if (response instanceof TransportError) return response;
+            const { id: raw, name, kind, essential, archived } = fundRecord(response), id = uuid(raw);
+            if (!id || name !== body.name || archived === true || (catalog === "categories" && ((kind !== undefined && kind !== body.kind) ||
+              (essential ?? false) !== (body.essential ?? false)))) throw new TypeError("Invalid catalog receipt");
+            return id;
+          }, { serverDate, confirmation });
+          // Rethrow after the journal removes definitive denials, so normal HTTP mapping still applies.
+          if (outcome instanceof TransportError) throw outcome;
+          return outcome;
+        } }, "La creación de catálogos no está disponible en este servidor.");
       return result as string;
     } catch (error) {
       if (error instanceof Error && error.message === workspaceUnavailable) throw new InvalidDraft(workspaceUnavailable);
-      if (error instanceof TransportError && error.kind === "http" && error.status === 403) throw new InvalidDraft("No tienes permiso para crear elementos en este espacio.");
+      if (error instanceof TransportError && error.kind === "http") {
+        if (error.status === 409) throw new InvalidDraft(catalogLabels[catalog].duplicate);
+        if (error.status === 403) throw new InvalidDraft("No tienes permiso para crear elementos en este espacio.");
+      }
       throw error;
     }
   } };
