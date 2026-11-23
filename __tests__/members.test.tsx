@@ -219,3 +219,31 @@ test("a lost invitation revocation response leaves no durable retry fingerprint"
   expect(keys).toEqual([expect.any(String), keys[0]]);
   expect(Storage.setItemAsync).not.toHaveBeenCalled();
 });
+
+// Reviewer draft (verify mwtpt3mr, not executed). Append to __tests__/members.test.tsx.
+test("invitation pagination refuses a workspace-bound roster cursor", async () => {
+  const f = setup();
+  const mock = f.fetch as unknown as jest.Mock;
+  const normal = mock.getMockImplementation()!;
+  const received: (string | null)[] = [];
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    const { pathname, searchParams } = new URL(url);
+    if (pathname !== invitations || init.method !== "GET") return normal(url, init);
+    received.push(searchParams.get("cursor"));
+    return {
+      status: 200, ok: true, redirected: false, headers: new Headers(),
+      json: async () => ({
+        items: [{ id: inviteId, email, role: "viewer", status: "pending", expiresAt: at, createdAt: at }],
+        pageInfo: { hasNextPage: true, nextCursor: cursor },
+      }),
+    };
+  });
+
+  await render(<Index />);
+  await press("Miembros del espacio");
+  await press("Ver invitaciones");
+  expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos cargar la lista.");
+  expect(screen.queryByRole("button", { name: "Más invitaciones" })).toBeNull();
+  expect(received).toEqual([null]);
+  expect(f.writes).toEqual([]);
+});

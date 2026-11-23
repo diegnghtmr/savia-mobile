@@ -9,7 +9,14 @@ import { OfflineBanner } from "../src/mobile-shell/offline-banner";
 
 jest.mock("expo-sqlite");
 jest.mock("expo/fetch", () => ({ fetch: jest.fn() }));
-jest.mock("expo-crypto", () => ({ randomUUID: require("node:crypto").randomUUID, getRandomBytesAsync: async (size: number) => require("node:crypto").randomBytes(size) }));
+// Reviewer regression (verify mwtr0ep1). __tests__/offline-cache.test.tsx (REPLACE the expo-crypto mock with this).
+jest.mock("expo-crypto", () => ({
+  randomUUID: require("node:crypto").randomUUID,
+  getRandomBytesAsync: async (size: number) => require("node:crypto").randomBytes(size),
+  CryptoDigestAlgorithm: { SHA256: "SHA-256" },
+  digestStringAsync: async (_: string, input: string) =>
+    require("node:crypto").createHash("sha256").update(input).digest("hex"),
+}));
 jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: jest.fn(), deleteItemAsync: jest.fn() }));
 const native = jest.requireMock("expo-sqlite");
 const saved = new Map<string, string>();
@@ -373,4 +380,50 @@ test("a newer complete membership response fences an older grant even with empty
   expect(f.send.mock.calls.some(([url]) => new URL(url).pathname === "/v1/accounts")).toBe(false);
   f.setOnline(false);
   await expect(read(f.reopen())(first.id, accounts)).rejects.toThrow();
+});
+
+// Reviewer regression (verify mwtr0ep1). __tests__/offline-cache.test.tsx (append).
+test.each(["transfer", "exchange", "fee"])("outbox keeps the expected %s transfer/exchange body across reconnect", async (kind) => {
+  const f = setup(), local = f.reopen();
+  await local.identity.select(first.id);
+  const normal = f.send.getMockImplementation()!;
+  const calls: { path: string; body: object; key: string | null }[] = [];
+  const account = (n: number) => `00000000-0000-4000-8000-00000000003${n}`;
+  f.send.mockImplementation(async (url, init) => {
+    const path = new URL(url).pathname;
+    if (path !== "/v1/transfers" && path !== "/v1/currency-exchanges") return normal(url, init);
+    const body = JSON.parse(String(init.body));
+    calls.push({ path, body, key: new Headers(init.headers).get("Idempotency-Key") });
+    return Response.json({
+      id: account(3), sourceAccountId: body.sourceAccountId, destinationAccountId: body.destinationAccountId,
+    }, { status: 201 });
+  });
+
+  const box = local.outbox(profile, first.id, local.scope(profile, first.id, f.api.requestInWorkspace, jest.fn()));
+  const { createTransfers } = require("../src/foundation/transfers") as typeof import("../src/foundation/transfers");
+  const isFX = kind === "exchange";
+  const api = createTransfers(box.request, first.id, async () => [
+    { id: account(1), name: "Caja", currency: "USD" },
+    { id: account(2), name: "Destino", currency: isFX ? "JPY" : "USD" },
+  ]);
+  await api.loadAccounts();
+  const fields = {
+    sourceAccountId: account(1), destinationAccountId: account(2), amount: "12.50", date: "2026-11-22",
+    ...(isFX ? { received: "1800", executedRate: "144" } : kind === "fee" ? { fee: "0,35" } : {}),
+  };
+  f.setOnline(false);
+  await expect(api.submit(isFX ? "exchange" : "transfer", fields)).rejects.toThrow(/Guardado sin conexión/);
+  expect(await box.list()).toHaveLength(1);
+  expect(calls).toEqual([]);
+  f.setOnline(true); await box.sync();
+  expect(await box.list()).toEqual([]);
+  const amount = { amountMinor: "1250", currency: "USD" };
+  expect(calls).toEqual([{
+    path: isFX ? "/v1/currency-exchanges" : "/v1/transfers", key: expect.any(String),
+    body: {
+      sourceAccountId: account(1), destinationAccountId: account(2), occurredAt: "2026-11-22T00:00:00.000Z", description: null,
+      ...(isFX ? { sourceAmount: amount, destinationAmount: { amountMinor: "1800", currency: "JPY" }, executedRate: "144" }
+        : { amount, ...(kind === "fee" && { fee: { amountMinor: "35", currency: "USD" } }) }),
+    },
+  }]);
 });

@@ -9,6 +9,8 @@ import { createAssistant } from "../foundation/assistant";
 import { getAuth } from "../foundation/auth";
 import { createBudgetWrites } from "../foundation/budget-writes";
 import { createBudgets } from "../foundation/budgets";
+import { createCatalogWrites } from "../foundation/catalog-writes";
+import { createDataJobs } from "../foundation/data-jobs";
 import { createDebtPayments } from "../foundation/debt-payments";
 import { createDebts } from "../foundation/debts";
 import { createForecasts } from "../foundation/forecasts";
@@ -37,7 +39,9 @@ import { AnalyticsScreen } from "../mobile-shell/analytics-screen";
 import { AssistantScreen } from "../mobile-shell/assistant-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { BudgetsScreen } from "../mobile-shell/budgets-screen";
+import { CatalogWritesScreen } from "../mobile-shell/catalog-writes-screen";
 import { DashboardScreen } from "../mobile-shell/dashboard-screen";
+import { DataJobsScreen } from "../mobile-shell/data-jobs-screen";
 import { DebtsScreen } from "../mobile-shell/debts-screen";
 import { defaultStatementSource } from "../mobile-shell/document-picker-source";
 import { ForecastsScreen } from "../mobile-shell/forecasts-screen";
@@ -71,7 +75,7 @@ export function SaviaMobile(sources: Sources) {
     home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members" | "subscriptions" | "recurring-rules";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members" | "subscriptions" | "recurring-rules" | "data-jobs" | "catalog-writes";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
 function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
   const latest = useRef(0);
@@ -81,6 +85,8 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
   const background = useMemo(() => offline.scope(profile, id, workspaceRequest, () => {}), [profile, id]);
   const box = useMemo(() => offline.outbox(profile, id, background), [profile, id, background]);
   const accountWrites = useMemo(() => createAccounts(background, id), [background, id]);
+  const dataJobs = useMemo(() => createDataJobs(background, id), [background, id]);
+  const catalogWrites = useMemo(() => createCatalogWrites(background, id), [background, id]);
   const [fundJournal] = useState(memoryPendingJournal);
   const apis = useMemo(() => {
     const publish = (at: number | null, merge = false) => {
@@ -141,11 +147,13 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
     : route === "members" ? <MembersScreen api={apis.members} back={back} />
     : route === "subscriptions" ? <SubscriptionsScreen api={apis.subscriptions} back={back} />
     : route === "recurring-rules" ? <RecurringRulesScreen api={apis.recurringRules} back={back} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} openSubscriptions={() => show("subscriptions")} openRecurringRules={() => show("recurring-rules")} />}</>;
+    : route === "data-jobs" ? <DataJobsScreen api={dataJobs} back={back} />
+    : route === "catalog-writes" ? <CatalogWritesScreen api={catalogWrites} back={back} />
+    : <HomeScreen openCatalogWrites={() => show("catalog-writes")} openDataJobs={() => show("data-jobs")} openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} openSubscriptions={() => show("subscriptions")} openRecurringRules={() => show("recurring-rules")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void; openSubscriptions?: () => void; openRecurringRules?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers, openSubscriptions, openRecurringRules }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void; openSubscriptions?: () => void; openRecurringRules?: () => void; openDataJobs?: () => void; openCatalogWrites?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers, openSubscriptions, openRecurringRules, openDataJobs, openCatalogWrites }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -168,12 +176,14 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
           </Pressable>}
         {openAccounts && <AuthAction label="Cuentas" action={openAccounts} />}
         {openTransactions && <AuthAction label="Movimientos" action={openTransactions} />}
+        {openCatalogWrites && <AuthAction label="Crear en catálogos" action={openCatalogWrites} />}
         {openSubscriptions && <AuthAction label="Suscripciones detectadas" action={openSubscriptions} />}
         {openRecurringRules && <AuthAction label="Reglas recurrentes" action={openRecurringRules} />}
         {openTransfers && <AuthAction label="Transferencias" action={openTransfers} />}
         {openBudgets && <AuthAction label="Presupuestos" action={openBudgets} />}
         {openFunds && <AuthAction label="Fondos" action={openFunds} />}
         {openDebts && <AuthAction label="Deudas" action={openDebts} />}
+        {openDataJobs && <AuthAction label="Informes y exportaciones" action={openDataJobs} />}
         {openImports && <AuthAction label="Importar extractos" action={openImports} />}
         {openReceipts && <AuthAction label="Recibos" action={openReceipts} />}
         {openNotifications && <AuthAction label="Notificaciones" action={openNotifications} />}

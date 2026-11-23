@@ -32,6 +32,7 @@ type RequestInput = { method?: string; body?: unknown; multipart?: FormData; ide
 type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
+  onResponseDate?: (date: number | null) => void;
   onlineOnly?: true;
   expectedProfile?: string;
   subjectResource?: true;
@@ -47,7 +48,7 @@ export class TransportError extends Error {
     super("Savia API request failed");
     this.name = "TransportError";
   }
-  toJSON() { return { kind: this.kind, status: this.status, code: this.code, problemType: this.problemType, message: this.message }; }
+  toJSON() { return { kind: this.kind, status: this.status, code: this.code, message: this.message }; }
 }
 
 export const isOfflineFailure = (error: unknown) => error instanceof TransportError && (error.kind === "network" || error.kind === "timeout");
@@ -166,7 +167,7 @@ export function createTransport({
         const scope = { id: options?.subjectResource ? undefined : id, ifMatch: options?.ifMatch, includeETag: options?.includeETag };
         return options?.submit
           ? options.submit(profileId, (idempotencyKey, dispatch) => execute(token, path, { ...options, ...dispatch, idempotencyKey }, scope), serverDate)
-          : execute(token, path, options, scope);
+          : execute(token, path, options, scope, options?.onResponseDate);
       });
     },
   };

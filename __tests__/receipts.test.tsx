@@ -85,3 +85,43 @@ test("stops automatic receipt checks after 30 attempts while OCR is still proces
     await view.unmount();
   } finally { jest.useRealTimers(); }
 });
+
+// Reviewer regression (verify mwtqgnix). Append to __tests__/receipts.test.tsx.
+test("receipt problem response has the baseline UI and durable retry record", async () => {
+  const crypto = jest.spyOn(require("expo-crypto"), "randomUUID").mockReturnValue(id(9));
+  try {
+    const f = setup(), normal = f.send.getMockImplementation()!, trace: unknown[] = [];
+    f.send.mockImplementation(async (url: string, init: RequestInit) => {
+      const response = await normal(url, init);
+      const path = new URL(url).pathname;
+      const headers = new Headers(init.headers);
+      trace.push([init.method, path, headers.get("X-Workspace-Id"), headers.get("Idempotency-Key"), init.redirect, init.credentials]);
+      if (init.method !== "POST" || path !== "/v1/receipts") return response;
+      return {
+        ...response, status: 422, ok: false,
+        headers: new Headers({ "Content-Type": "application/problem+json" }),
+        json: async () => ({
+          type: "https://savia.app/problems/receipt-dimensions-exceeded",
+          code: "receipt_dimensions_exceeded",
+          detail: "fixture-private-detail",
+        }),
+      };
+    });
+    const source = jest.fn(async () => image());
+    await render(<ReceiptsScreen api={f.reopen()} source={source} back={jest.fn()} />);
+    await press("Tomar foto");
+    await press("Subir recibo");
+    expect(await screen.findByRole("alert")).toHaveTextContent("El servidor no pudo aceptar la imagen.");
+    expect(screen.queryByText(/fixture-private-detail|receipt-dimensions-exceeded/)).toBeNull();
+    expect(f.pending()).toHaveLength(1);
+    expect(JSON.parse(f.pending()[0][1])).toEqual({ key: id(9), createdAt: start, clock: "server" });
+    expect(Storage.deleteItemAsync).not.toHaveBeenCalled();
+    expect(trace).toEqual([
+      ["GET", "/v1/me", null, null, "error", "omit"],
+      ["GET", "/v1/workspaces", null, null, "error", "omit"],
+      ["POST", "/v1/receipts", workspace, id(9), "error", "omit"],
+    ]);
+  } finally {
+    crypto.mockRestore();
+  }
+});

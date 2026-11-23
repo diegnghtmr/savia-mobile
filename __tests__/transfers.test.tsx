@@ -216,3 +216,20 @@ test.each(["transfer", "exchange"])("%s: clock correction does not allow a repla
       outcome: "Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo." });
   } finally { clock.mockRestore(); }
 });
+
+// Reviewer regression (verify mwtr0ep1). __tests__/transfers.test.tsx (append).
+test.each([["transfer", transfer], ["exchange", exchange]])("fee-free %s keeps the baseline request and clears the journal", async (mode, draft) => {
+  const crypto = jest.spyOn(require("expo-crypto"), "randomUUID").mockReturnValue(id(8));
+  try {
+    const f = setup(), api = f.connect();
+    await api.loadAccounts();
+    expect(await api.submit(mode, draft)).toBe(id(9));
+    const [write] = f.writes;
+    expect(write).toMatchObject({
+      path: mode === "transfer" ? "/v1/transfers" : "/v1/currency-exchanges",
+      key: id(8), persisted: true,
+    });
+    expect(write.body).not.toHaveProperty("fee");
+    expect(f.pending()).toEqual([]);
+  } finally { crypto.mockRestore(); }
+});

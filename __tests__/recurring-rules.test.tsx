@@ -56,3 +56,23 @@ test("rejects a foreign-workspace continuation without exposing rows or a load-m
   expect(screen.queryByText("Donación")).toBeNull(); expect(screen.queryByRole("button", { name: "Cargar más reglas" })).toBeNull();
   expect(f.reads).toEqual([null]);
 });
+
+// Reviewer regression (verify mwtr0ep1). __tests__/recurring-rules.test.tsx (append).
+test("a recurring continuation that repeats a rule cannot expose a second page", async () => {
+  const f = setup(), normal = f.fetch.getMockImplementation()!;
+  f.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    const page = new URL(url);
+    if (page.pathname !== recurring || !page.searchParams.has("cursor")) return response;
+    return { ...response, json: async () => ({
+      items: [{ id: first, name: "Duplicada", frequency: "weekly", behavior: "remind", active: true, nextOccurrenceAt: stamp }],
+      pageInfo: { hasNextPage: false, nextCursor: null },
+    }) };
+  });
+  await render(<Index />); await press("Reglas recurrentes"); await screen.findByText("Donación");
+  await press("Cargar más reglas");
+  expect(await screen.findByRole("alert")).toHaveTextContent("No pudimos cargar las reglas recurrentes.");
+  expect(screen.queryByText("Duplicada")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Cargar más reglas" })).toBeNull();
+  expect(f.reads).toEqual([null, encode(workspace)]);
+});

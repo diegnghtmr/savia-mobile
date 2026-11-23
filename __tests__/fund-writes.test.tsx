@@ -233,9 +233,11 @@ test("withdrawal validates before dispatch, reuses a lost-response key and never
   await enter("Motivo del retiro", "  Reparación  "); f.lose(); await press("Registrar retiro");
   await screen.findByText(/Necesitas conexión/);
   await press("Registrar retiro"); await screen.findByText("Ahorrado: 8,750 KWD");
-  expect(f.writes).toEqual([expect.objectContaining({ path: withdrawals, key: expect.any(String), match: null, persisted: false,
+  expect(f.writes).toEqual([expect.objectContaining({ path: withdrawals, key: expect.any(String), match: null, persisted: true,
     body: { accountId: account, amount: { amountMinor: "1250", currency: "KWD" }, reason: "Reparación" } }), f.writes[0]]);
-  expect(f.replay.size).toBe(1); expect(secure.setItemAsync).not.toHaveBeenCalled();
+  expect(f.replay.size).toBe(1); expect(f.pending()).toEqual([]);
+  expect(secure.setItemAsync).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(secure.setItemAsync.mock.calls[0][1])).toEqual({ key: f.writes[0].key, createdAt: Date.UTC(2026, 10, 1), clock: "server" });
 });
 
 test.each([409, 422])("a refused withdrawal (%s) shows a Spanish error without changing the fund", async (status) => {
@@ -246,4 +248,57 @@ test.each([409, 422])("a refused withdrawal (%s) shows a Spanish error without c
   expect(await screen.findByRole("alert")).toHaveTextContent(status === 409 ? "El retiro supera el saldo ahorrado del fondo." : "El fondo no tiene saldo suficiente para este retiro.");
   expect(f.replay.size).toBe(0); expect(f.pending()).toEqual([]);
   await press("Volver al fondo"); await screen.findByText("Ahorrado: 10,000 KWD");
+});
+
+// Reviewer regression (verify mwtr0ep1). __tests__/fund-writes.test.tsx (append).
+test("a withdrawal retried after reopening the app cannot debit twice", async () => {
+  const f = setup(true), first = f.connect();
+  const draft = { accountId: account, amount: "1,250", reason: "Reparación urgente" };
+  await first.loadAccounts();
+  f.lose();
+  await expect(first.withdraw(fund, "KWD", draft)).rejects.toThrow(/Necesitas conexión/);
+  expect((await f.api.detail(fund))?.saved).toBe("8,750 KWD");
+  expect(f.replay.size).toBe(1);
+
+  const reopened = f.connect();
+  await reopened.loadAccounts();
+  await reopened.withdraw(fund, "KWD", { ...draft, amount: "01.250" });
+  expect(JSON.stringify(secure.setItemAsync.mock.calls)).not.toContain(draft.reason);
+  expect({
+    effects: f.replay.size,
+    saved: (await f.api.detail(fund))?.saved,
+    keys: new Set(f.writes.map(({ key }) => key)).size,
+  }).toEqual({ effects: 1, saved: "8,750 KWD", keys: 1 });
+});
+
+test.each([401, 403])("fund detail does not downgrade a %s to a legacy list lookup", async (status) => {
+  const f = setup(true), normal = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (url, init) => {
+    const response = await normal(url, init);
+    return new URL(url).pathname === detail ? { ...response, ok: false, status } : response;
+  });
+  await expect(f.api.detail(fund)).rejects.toMatchObject({ status });
+  expect(f.send.mock.calls.map(([url]) => new URL(url).pathname))
+    .toEqual(["/v1/me", "/v1/workspaces", detail]);
+  expect(f.writes).toEqual([]);
+});
+
+test("an expired opaque withdrawal retry after reopen preserves the balance until explicitly confirmed", async () => {
+  const f = setup(true), first = f.connect();
+  const draft = { accountId: account, amount: "1,250", reason: "Reparación urgente" };
+  await first.loadAccounts(); f.lose();
+  await expect(first.withdraw(fund, "KWD", draft)).rejects.toThrow(/Necesitas conexión/);
+  const { key, body } = f.writes[0];
+  const hash = require("node:crypto").createHash("sha256").update(JSON.stringify(["POST", withdrawals, body])).digest("hex");
+  const expectedSlot = [`savia.ledger.v1.${workspace}.${profile}.${hash}`, JSON.stringify({ key, createdAt: Date.UTC(2026, 10, 1), clock: "server" })];
+  expect(f.pending()).toEqual([expectedSlot]);
+  const reopened = f.connect(); await reopened.loadAccounts(); f.advance(23 * hours);
+  const warning = await reopened.withdraw(fund, "KWD", draft).catch((error) => error);
+  expect(warning.message).toBe("Puede que este movimiento ya se haya registrado. Revisa la lista antes de volver a intentarlo.");
+  expect(f.writes).toHaveLength(1); expect(f.pending()).toEqual([expectedSlot]); expect(f.replay.size).toBe(1);
+  expect((await f.api.detail(fund))?.saved).toBe("8,750 KWD");
+  await reopened.withdraw(fund, "KWD", draft, warning);
+  expect(f.writes[1]).toMatchObject({ body, persisted: true }); expect(f.writes[1].key).not.toBe(key);
+  expect(f.pending()).toEqual([]); expect(f.replay.size).toBe(2);
+  expect((await f.api.detail(fund))?.saved).toBe("7,500 KWD");
 });

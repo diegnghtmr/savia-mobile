@@ -107,3 +107,30 @@ test("a revoked workspace stops a decision before dispatch", async () => {
   expect(f.fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
   expect(f.calls).toEqual([]); expect(f.completed.size).toBe(0);
 });
+
+// Reviewer regression (verify mwtr0ep1). __tests__/subscriptions.test.tsx (append).
+test("discard retries once with the same key and leaves cache and outbox byte-identical", async () => {
+  const f = setup({ lose: true }); await open(); await decide("descartar");
+  const { offlineStore } = require("../src/foundation/offline-db") as typeof import("../src/foundation/offline-db");
+  const store = offlineStore();
+  const hash = () => store(async (db) => require("node:crypto").createHash("sha256").update(JSON.stringify([
+    await db.getAllAsync("SELECT * FROM cache ORDER BY rowid"),
+    await db.getAllAsync("SELECT * FROM outbox ORDER BY id"),
+  ])).digest("hex"));
+  const before = await hash();
+  jest.mocked(Storage.setItemAsync).mockClear();
+  jest.mocked(Storage.deleteItemAsync).mockClear();
+
+  await press("Sí, descartar"); await screen.findByText("No pudimos actualizar la suscripción.");
+  expect(await hash()).toBe(before);
+  await press("Sí, descartar"); await screen.findByText("Suscripción descartada.");
+  expect(await hash()).toBe(before);
+  expect(f.calls).toEqual([
+    { pathname: `${path}/${first}/discard`, etag: '"1"', key: expect.any(String), body: undefined },
+    f.calls[0],
+  ]);
+  expect([...f.completed.values()]).toEqual([expect.objectContaining({ status: "ignored" })]);
+  expect([...f.completed.values()][0]).not.toHaveProperty("recurringRuleId");
+  expect(Storage.setItemAsync).not.toHaveBeenCalled();
+  expect(Storage.deleteItemAsync).not.toHaveBeenCalled();
+});

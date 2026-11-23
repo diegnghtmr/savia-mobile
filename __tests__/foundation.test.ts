@@ -147,3 +147,22 @@ test("does not expose the bearer in serialized problem metadata", async () => {
   });
   expect(JSON.stringify(error)).not.toContain(token);
 });
+
+// Reviewer draft (verify mwtpt3mr, not executed). Append to __tests__/foundation.test.ts.
+test("receipt upload failures retain their baseline serialized shape", async () => {
+  const { client } = setup(422, {
+    type: "https://savia.app/problems/receipt-dimensions-exceeded",
+    code: "receipt_dimensions_exceeded",
+    detail: "fixture image exceeds the dimension limit",
+  }, "application/problem+json");
+  const error = await client.request("/v1/receipts", {
+    method: "POST", multipart: new FormData(),
+  }).catch((failure: unknown) => failure);
+
+  expect(JSON.parse(JSON.stringify(error))).toEqual({
+    kind: "http",
+    status: 422,
+    code: "receipt_dimensions_exceeded",
+    message: "Savia API request failed",
+  });
+});

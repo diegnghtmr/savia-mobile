@@ -79,7 +79,7 @@ function updateBody(input: unknown, currency: string, accounts: ReadonlyMap<stri
   } catch { throw invalidFund(); }
 }
 
-export function createFundWrites(request: ScopedRequest, workspace: string, accountChoices: Transactions["transferAccounts"], journal = memoryPendingJournal()) {
+export function createFundWrites(request: ScopedRequest, workspace: string, accountChoices: Transactions["transferAccounts"], editJournal = memoryPendingJournal()) {
   let accounts = new Map<string, string>();
   const scope = uuid(workspace);
   async function liveWrite(id: string, suffix: string, method: "PATCH" | "POST", body: object, parse: (raw: unknown) => unknown,
@@ -87,9 +87,17 @@ export function createFundWrites(request: ScopedRequest, workspace: string, acco
     if (!scope) throw invalidFund();
     const path = `${fundsPath}/${id}${suffix}`;
     try {
-      await request(scope, path, { method, body, ifMatch, includeETag: method === "PATCH", successStatus: method === "PATCH" ? 200 : 201,
-        submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, JSON.stringify([method, path, body]),
-          async (key) => parse(await operation(key)), { ifMatch, serverDate, confirmation, journal }) });
+      const result = await request(scope, path, { method, body, ifMatch, includeETag: method === "PATCH", successStatus: method === "PATCH" ? 200 : 201,
+        // For withdrawals the default SecureStore journal saves the slot hash and server-clock metadata, never the body.
+        submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, JSON.stringify([method, path, body]), async (key) => {
+          const raw = await operation(key).catch((error: unknown) => {
+            // These withdrawal rejections leave both balances unchanged. A lost or malformed reply does not prove rejection.
+            if (method === "POST" && error instanceof TransportError && error.kind === "http" && (error.status === 409 || error.status === 422)) return error;
+            throw error;
+          });
+          return raw instanceof TransportError ? raw : parse(raw);
+        }, { ifMatch, serverDate, confirmation, journal: method === "PATCH" ? editJournal : undefined }) });
+      if (result instanceof TransportError) throw result;
     } catch (error) {
       if (isOfflineFailure(error)) throw connection();
       throw error;

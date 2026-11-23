@@ -181,3 +181,18 @@ test("default registration explains a missing project ID without prompting for p
   expect(f.read).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
   expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(screen.queryByText("Dispositivo registrado.")).toBeNull();
 });
+
+// Reviewer draft (verify mwtpt3mr, not executed). Append to __tests__/notification-preferences.test.tsx.
+test("a permanent permission denial does not prompt again or send a registration", async () => {
+  const f = await openDefaultRegistration("ios", "eas");
+  jest.mocked(Notifications.getPermissionsAsync).mockResolvedValueOnce(permission(false, false));
+
+  await press("Registrar este dispositivo");
+  expect(await screen.findByRole("alert"))
+    .toHaveTextContent("Activa el permiso de notificaciones en los ajustes para registrar este dispositivo.");
+  expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(f.send).not.toHaveBeenCalled();
+  expect(f.writes).toEqual([]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});
