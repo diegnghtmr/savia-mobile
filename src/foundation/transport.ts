@@ -71,6 +71,11 @@ function safePath(path: string) {
 }
 // These contract routes are subject-scoped; callers still verify the active workspace before dispatch.
 const subjectRoute = /^\/v1\/(?:notifications(?:\?|$)|notifications\/[a-f\d-]{36}\/read$|me\/(?:notification-preferences|push-devices)$)/;
+function subjectAccessRoute(path: string, method = "GET") {
+  if (method === "GET") return /^\/v1\/mcp\/grants(?:\?.*)?$/.test(path);
+  if (method === "POST") return path === "/v1/mcp/grants" || path === "/v1/cli/device/approve";
+  return method === "DELETE" && /^\/v1\/mcp\/grants\/[a-f\d-]{36}$/.test(path);
+}
 function rejectRedirect(response: Pick<Response, "status" | "redirected">) {
   if (response.redirected || (response.status >= 300 && response.status < 400)) throw new TransportError("redirect");
 }
@@ -133,7 +138,7 @@ export function createTransport({
     async requestInWorkspace(expected: unknown, path: string, options?: RequestInput & WorkspaceOptions) {
       safePath(path);
       const id = uuid(expected);
-      if (options?.subjectResource && !subjectRoute.test(path)) throw new TypeError("Invalid Savia subject resource");
+      if (options?.subjectResource && !subjectRoute.test(path) && !subjectAccessRoute(path, options.method)) throw new TypeError("Invalid Savia subject resource");
       if (!id) throw new Error(workspaceUnavailable);
       return withBearer(async (token) => {
         const request = bind(token);
