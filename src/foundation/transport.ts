@@ -5,6 +5,27 @@ import { sessionStore, type SessionCredentials } from "./session-store";
 import { readProfileId, readWorkspaceContext, uuid, type WorkspaceContext } from "./workspace-context";
 
 const timeoutDefault = 10_000;
+
+// React Native's local URI handlers produce a Blob without a file copy or an API session.
+// Keep the generic request primitive at the transport boundary and reject every remote scheme.
+export async function readLocalBlob(uri: string): Promise<Blob> {
+  if (!/^(?:file:\/\/\/[^/]|content:\/\/[a-z\d._-]+\/)[^\u0000-\u0020\\]*$/i.test(uri)) throw new Error("Invalid picker URI");
+  return new Promise<Blob>((resolve, reject) => {
+    const local = new XMLHttpRequest();
+    const failed = () => reject(new Error("Could not read picker file"));
+    local.open("GET", uri);
+    local.withCredentials = false;
+    local.timeout = timeoutDefault;
+    local.responseType = "blob";
+    local.onload = () => {
+      // Android's local Blob URI handler can complete without an HTTP-style status.
+      if ((local.status === 0 || local.status === 200) && local.response instanceof Blob) resolve(local.response);
+      else failed();
+    };
+    local.onerror = local.onabort = local.ontimeout = failed;
+    local.send();
+  });
+}
 type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
 type RequestInput = { method?: string; body?: unknown; multipart?: FormData; idempotencyKey?: string; successStatus?: number | readonly number[] };
 type WorkspaceOptions = {

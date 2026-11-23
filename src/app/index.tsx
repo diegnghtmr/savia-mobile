@@ -29,8 +29,10 @@ import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { BudgetsScreen } from "../mobile-shell/budgets-screen";
 import { DashboardScreen } from "../mobile-shell/dashboard-screen";
 import { DebtsScreen } from "../mobile-shell/debts-screen";
+import { defaultStatementSource } from "../mobile-shell/document-picker-source";
 import { ForecastsScreen } from "../mobile-shell/forecasts-screen";
 import { FundsScreen } from "../mobile-shell/funds-screen";
+import { defaultReceiptSource } from "../mobile-shell/image-picker-source";
 import { ImportsScreen } from "../mobile-shell/imports-screen";
 import { NotificationInbox } from "../mobile-shell/notification-inbox";
 import { NotificationSettings } from "../mobile-shell/notification-settings";
@@ -45,7 +47,7 @@ import { TransfersScreen } from "../mobile-shell/transfers-screen";
 const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
 const offline = createOffline(createIdentity((operation) => transport().withSession(operation)), () => getAuth().localPrincipal?.() ?? Promise.resolve(null));
 
-export default function Index() { return <SaviaMobile />; }
+export default function Index() { return <SaviaMobile statementSource={defaultStatementSource} imageSource={defaultReceiptSource} />; }
 
 type Sources = { statementSource?: StatementFileSource; imageSource?: ReceiptImageSource; pushTokenSource?: PushTokenSource };
 export function SaviaMobile(sources: Sources) {

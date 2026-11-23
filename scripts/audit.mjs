@@ -65,7 +65,10 @@ export async function audit(target = root, parent = join(target, "..")) {
     )) reject("Supabase outside auth");
     if ((appCode || appDependency) && path !== "src/foundation/transport.ts" && network.test(text)) reject("network outside transport");
     if (appCode && path !== "src/foundation/session-store.ts" && /expo-secure-store/i.test(text)) reject("secure storage outside session store");
-    if ((appCode || appDependency) && plainStorage.test(text)) reject("unapproved persistence");
+    // This adapter alone may unlink SDK-owned temporary picks; other persistence rules still apply there.
+    const persistenceText = path === "src/mobile-shell/image-picker-source.ts"
+      ? text.replace('import type * as PickerCache from "expo-file-system";', '').replace('require("expo-file-system")', '') : text;
+    if ((appCode || appDependency) && plainStorage.test(persistenceText)) reject("unapproved persistence");
     if (/\bexpo-sqlite\b/i.test(text)) {
       if (appCode && path !== "src/foundation/offline-db.ts") reject("unapproved persistence");
       if (appDependency || appCode) sqlite = true;

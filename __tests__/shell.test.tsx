@@ -1,8 +1,14 @@
-import { fireEvent, render, screen } from "@testing-library/react-native";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react-native";
 import { StyleSheet, useColorScheme, useWindowDimensions } from "react-native";
-import { HomeScreen, SaviaMobile } from "../src/app/index";
+import * as DocumentPicker from "expo-document-picker";
+import { File as LocalFile } from "expo-file-system";
+import * as ImagePicker from "expo-image-picker";
+import Index, { HomeScreen, SaviaMobile } from "../src/app/index";
 import NotFoundScreen from "../src/app/+not-found";
 import { InvalidDraft } from "../src/foundation/identity-draft";
+import { createImports } from "../src/foundation/imports";
+import { createReceipts } from "../src/foundation/receipts";
+import { createTransport } from "../src/foundation/transport";
 import { createInbox } from "../src/foundation/notification-inbox";
 import { createNotificationPreferences } from "../src/foundation/notification-preferences";
 
@@ -14,14 +20,14 @@ jest.mock("../src/foundation/budget-writes", () => ({ createBudgetWrites: jest.f
 jest.mock("../src/foundation/debt-payments", () => ({ createDebtPayments: jest.fn() }));
 jest.mock("../src/foundation/debts", () => ({ createDebts: jest.fn() }));
 jest.mock("../src/foundation/forecasts", () => ({ createForecasts: jest.fn() }));
-jest.mock("../src/foundation/receipts", () => ({ createReceipts: jest.fn(() => ({})) }));
+jest.mock("../src/foundation/receipts", () => ({ ...jest.requireActual("../src/foundation/receipts"), createReceipts: jest.fn(() => ({})) }));
 jest.mock("../src/foundation/notification-inbox", () => ({ createInbox: jest.fn() }));
 jest.mock("../src/foundation/notification-preferences", () => ({ createNotificationPreferences: jest.fn() }));
 jest.mock("../src/foundation/receipt-confirmations", () => ({ createReceiptConfirmations: jest.fn() }));
 jest.mock("../src/foundation/scenarios", () => ({ createScenarios: jest.fn() }));
-jest.mock("../src/foundation/funds", () => ({ createFunds: jest.fn() }));
+jest.mock("../src/foundation/funds", () => ({ ...jest.requireActual("../src/foundation/funds"), createFunds: jest.fn() }));
 jest.mock("../src/foundation/fund-writes", () => ({ createFundWrites: jest.fn() }));
-jest.mock("../src/foundation/imports", () => ({ createImports: jest.fn() }));
+jest.mock("../src/foundation/imports", () => ({ ...jest.requireActual("../src/foundation/imports"), createImports: jest.fn() }));
 jest.mock("../src/foundation/import-commits", () => ({ createImportCommits: jest.fn() }));
 jest.mock("../src/foundation/identity", () => ({ createIdentity: jest.fn() }));
 jest.mock("../src/foundation/offline-cache", () => ({ createOffline: jest.fn(() => {
@@ -32,6 +38,11 @@ jest.mock("../src/foundation/offline-cache", () => ({ createOffline: jest.fn(() 
 jest.mock("../src/foundation/transactions", () => ({ createTransactions: jest.fn(() => ({})) }));
 jest.mock("../src/foundation/transfers", () => ({ createTransfers: jest.fn() }));
 jest.mock("expo/fetch", () => ({ fetch: jest.fn() }));
+jest.mock("expo-crypto", () => ({}));
+jest.mock("expo-document-picker", () => ({ getDocumentAsync: jest.fn() }));
+jest.mock("expo-image-picker", () => ({ requestCameraPermissionsAsync: jest.fn(), requestMediaLibraryPermissionsAsync: jest.fn(),
+  launchCameraAsync: jest.fn(), launchImageLibraryAsync: jest.fn() }));
+jest.mock("expo-file-system", () => ({ Paths: { cache: { uri: "file:///private/cache/" } }, File: jest.fn() }));
 jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: jest.fn(), deleteItemAsync: jest.fn() }));
 jest.mock("../src/foundation/transport", () => ({ ...jest.requireActual("../src/foundation/transport"), createTransport: jest.fn() }));
 
@@ -114,6 +125,106 @@ test("opens receipts from the workspace home", async () => {
   const open = jest.fn(); await render(<HomeScreen openReceipts={open} />);
   await fireEvent.press(screen.getByRole("button", { name: "Recibos" }));
   expect(open).toHaveBeenCalledTimes(1);
+});
+
+const pressPicker = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
+const pickerLimit = 5 * 1024 * 1024;
+const cancel = { canceled: true, assets: null } as const;
+const permission = { granted: true, canAskAgain: true, expires: "never", status: "granted" } as Awaited<ReturnType<typeof ImagePicker.requestCameraPermissionsAsync>>;
+const receiptUri = "file:///private/cache/ImagePicker/cb8e9033-5ec0-43f9-8253-5ee243d70c68.png";
+const receiptAsset = { uri: receiptUri, width: 10, height: 10, fileName: "recibo.png", mimeType: "image/png", fileSize: 4 };
+
+function localBlob(blob: Blob) {
+  const request = { status: 0, response: blob, onload: () => {}, open: jest.fn(), send: jest.fn((): void => request.onload()) };
+  const create = jest.fn(() => request);
+  Object.defineProperty(globalThis, "XMLHttpRequest", { configurable: true, value: create });
+  return { request, create };
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.mocked(DocumentPicker.getDocumentAsync).mockResolvedValue(cancel);
+  jest.mocked(ImagePicker.requestCameraPermissionsAsync).mockResolvedValue(permission);
+  jest.mocked(ImagePicker.requestMediaLibraryPermissionsAsync).mockResolvedValue(permission);
+  jest.mocked(ImagePicker.launchCameraAsync).mockResolvedValue(cancel);
+  jest.mocked(ImagePicker.launchImageLibraryAsync).mockResolvedValue(cancel);
+});
+const originalLocalReader = Object.getOwnPropertyDescriptor(globalThis, "XMLHttpRequest");
+afterEach(() => {
+  if (originalLocalReader) Object.defineProperty(globalThis, "XMLHttpRequest", originalLocalReader);
+  else Reflect.deleteProperty(globalThis, "XMLHttpRequest");
+});
+
+test("the default route picks one CSV without copying it, rejects a byte over the limit, and uploads only on submit", async () => {
+  const uri = "content://documents/extracto", asset = { uri, name: "extracto.csv", lastModified: 0, size: pickerLimit };
+  const blob = new Blob([new Uint8Array(pickerLimit)], { type: "text/csv" }), { create, request } = localBlob(blob);
+  const upload = jest.fn().mockRejectedValue(new InvalidDraft("Archivo recibido por la prueba."));
+  jest.mocked(createImports).mockReturnValue({ upload, detail: jest.fn() });
+  jest.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ ...asset, size: pickerLimit + 1 }] })
+    .mockResolvedValueOnce({ canceled: false, assets: [{ ...asset, uri: "https://files.invalid/extracto.csv" }] })
+    .mockResolvedValueOnce({ canceled: false, assets: [asset] });
+  await render(<Index />);
+  await pressPicker("Importar extractos");
+  expect(DocumentPicker.getDocumentAsync).not.toHaveBeenCalled();
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText("Elige un archivo CSV de hasta 5 MiB.")).toBeTruthy();
+  expect(DocumentPicker.getDocumentAsync).toHaveBeenCalledWith({ type: ["text/csv", "application/csv", "application/vnd.ms-excel"], copyToCacheDirectory: false, multiple: false, base64: false });
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText("No pudimos abrir el selector de archivos.")).toBeTruthy();
+  expect(create).not.toHaveBeenCalled(); expect(upload).not.toHaveBeenCalled(); expect(createTransport).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Subir para analizar" })).toBeNull();
+  await pressPicker("Elegir extracto");
+  expect(await screen.findByText(asset.name)).toBeTruthy();
+  expect(request.open).toHaveBeenCalledWith("GET", uri); expect(upload).not.toHaveBeenCalled();
+  await pressPicker("Subir para analizar");
+  expect(await screen.findByText("Archivo recibido por la prueba.")).toBeTruthy();
+  expect(upload).toHaveBeenCalledWith({ name: asset.name, blob });
+  await pressPicker("Elegir extracto");
+  await waitFor(() => expect(screen.queryByText(asset.name)).toBeNull());
+  expect(request.open).toHaveBeenCalledTimes(1); expect(upload).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  ["Tomar foto", "Activa el permiso de cámara en los ajustes para tomar una foto del recibo.", ImagePicker.requestCameraPermissionsAsync],
+  ["Elegir de la galería", "Activa el permiso de fotos en los ajustes para elegir una imagen del recibo.", ImagePicker.requestMediaLibraryPermissionsAsync],
+])("the default receipt route handles denial on demand for %s", async (action, message, requestPermission) => {
+  jest.mocked(requestPermission).mockResolvedValueOnce({ ...permission, granted: false });
+  await render(<Index />);
+  await pressPicker("Recibos");
+  expect(ImagePicker.requestCameraPermissionsAsync).not.toHaveBeenCalled();
+  expect(ImagePicker.requestMediaLibraryPermissionsAsync).not.toHaveBeenCalled();
+  await pressPicker(action);
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(requestPermission).toHaveBeenCalledTimes(1);
+  expect(ImagePicker.launchCameraAsync).not.toHaveBeenCalled(); expect(ImagePicker.launchImageLibraryAsync).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Subir recibo" })).toBeNull(); expect(createTransport).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["Tomar foto", ImagePicker.requestCameraPermissionsAsync, ImagePicker.launchCameraAsync, ImagePicker.launchImageLibraryAsync],
+  ["Elegir de la galería", ImagePicker.requestMediaLibraryPermissionsAsync, ImagePicker.launchImageLibraryAsync, ImagePicker.launchCameraAsync],
+])("the default receipt route keeps only the in-memory image when using %s", async (action, requestPermission, launch, otherLaunch) => {
+  const blob = new Blob(["body"], { type: "image/png" }), { request, create } = localBlob(blob);
+  const remove = jest.fn(), upload = jest.fn().mockRejectedValue(new InvalidDraft("Imagen recibida por la prueba."));
+  jest.mocked(LocalFile).mockImplementation(() => ({ delete: remove } as unknown as LocalFile));
+  jest.mocked(createReceipts).mockReturnValue({ upload, detail: jest.fn() });
+  jest.mocked(launch).mockResolvedValueOnce({ canceled: false, assets: [{ ...receiptAsset, fileSize: pickerLimit + 1 }] })
+    .mockResolvedValueOnce({ canceled: false, assets: [receiptAsset] });
+  await render(<Index />);
+  await pressPicker("Recibos");
+  await pressPicker(action);
+  expect(await screen.findByText("Elige una imagen JPEG, PNG o WebP de hasta 5 MiB.")).toBeTruthy();
+  expect(launch).toHaveBeenCalledWith(expect.objectContaining({ mediaTypes: ["images"], allowsEditing: false, allowsMultipleSelection: false, base64: false, exif: false }));
+  expect(jest.mocked(requestPermission).mock.invocationCallOrder[0]).toBeLessThan(jest.mocked(launch).mock.invocationCallOrder[0]);
+  expect(create).not.toHaveBeenCalled(); expect(upload).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledTimes(1);
+  await pressPicker(action);
+  expect(await screen.findByText("recibo.png")).toBeTruthy();
+  expect(request.open).toHaveBeenCalledWith("GET", receiptUri);
+  expect(otherLaunch).not.toHaveBeenCalled(); expect(LocalFile).toHaveBeenCalledWith(receiptUri);
+  expect(remove).toHaveBeenCalledTimes(2); expect(upload).not.toHaveBeenCalled(); expect(createTransport).not.toHaveBeenCalled();
+  await pressPicker("Subir recibo");
+  expect(await screen.findByText("Imagen recibida por la prueba.")).toBeTruthy();
+  expect(upload).toHaveBeenCalledWith({ name: "recibo.png", blob }, undefined);
 });
 
 test("navigates from the workspace to the inbox and settings and passes the optional push source on demand", async () => {

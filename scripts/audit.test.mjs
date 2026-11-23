@@ -41,6 +41,15 @@ test("allows SQLite only behind its cipher adapter and the SQLCipher plugin", as
   await assert.rejects(audit(app), /SQLCipher plugin required/);
 });
 
+test("allows the receipt picker cache adapter without allowing other persistence there", async (t) => {
+  const path = "src/mobile-shell/image-picker-source.ts";
+  const allowed = 'import type * as PickerCache from "expo-file-system";\nconst { File } = require("expo-file-system") as typeof PickerCache;';
+  const app = await fixture(t, { [path]: allowed });
+  await assert.doesNotReject(audit(app));
+  await writeFile(join(app, path), `${allowed}\nlocalStorage.setItem("x", "y");`);
+  await assert.rejects(audit(app), /unapproved persistence/);
+});
+
 test("audits the checked-out repository without an exact inventory", async () => {
   await assert.doesNotReject(audit());
 });
