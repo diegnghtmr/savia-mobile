@@ -1,11 +1,26 @@
 import { fireEvent, render, screen } from "@testing-library/react-native";
+import Constants from "expo-constants";
+import { fetch as sendRequest } from "expo/fetch";
+import * as Notifications from "expo-notifications";
 import * as Storage from "expo-secure-store";
+import { Platform } from "react-native";
+import Index from "../src/app/index";
 import { createNotificationPreferences } from "../src/foundation/notification-preferences";
 import { createTransport } from "../src/foundation/transport";
 import { NotificationSettings } from "../src/mobile-shell/notification-settings";
 
 jest.mock("expo/fetch", () => ({ fetch: jest.fn() }));
+jest.mock("expo-constants", () => ({ __esModule: true, default: { expoConfig: null, easConfig: null } }));
+jest.mock("expo-notifications", () => ({
+  AndroidImportance: { DEFAULT: 3 }, IosAuthorizationStatus: { PROVISIONAL: 3 }, setNotificationChannelAsync: jest.fn(),
+  getPermissionsAsync: jest.fn(), requestPermissionsAsync: jest.fn(), getExpoPushTokenAsync: jest.fn(),
+}));
+jest.mock("expo-sqlite");
+jest.mock("../src/foundation/config", () => ({ readApiOrigin: () => "https://api.invalid" }));
+const mockReadSession = jest.fn();
+jest.mock("../src/foundation/auth", () => ({ getAuth: () => ({ readSession: mockReadSession, localPrincipal: async () => "notification-tests" }) }));
 jest.mock("expo-crypto", () => ({ randomUUID: require("node:crypto").randomUUID, CryptoDigestAlgorithm: { SHA256: "SHA-256" },
+  getRandomBytesAsync: async (size: number) => require("node:crypto").randomBytes(size),
   digestStringAsync: async (_: string, value: string) => require("node:crypto").createHash("sha256").update(value).digest("hex") }));
 jest.mock("expo-secure-store", () => ({ getItemAsync: jest.fn(), setItemAsync: jest.fn(), deleteItemAsync: jest.fn() }));
 const id = (n: number) => `abca0000-0000-4000-8000-00000000000${n}`;
@@ -15,7 +30,7 @@ const token = { expoPushToken: "ExpoPushToken[synthetic-fixture]", platform: "io
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 function setup() {
   jest.clearAllMocks();
-  const storage = new Map([[`savia.workspace.${profile}`, workspace]]);
+  const storage = new Map([[`savia.workspace.${profile}`, workspace], ["savia.offline.key.v1", "a".repeat(64)]]);
   jest.mocked(Storage.getItemAsync).mockImplementation(async (key) => storage.get(key) ?? null);
   jest.mocked(Storage.setItemAsync).mockImplementation(async (key, value) => { storage.set(key, value); });
   jest.mocked(Storage.deleteItemAsync).mockImplementation(async (key) => { storage.delete(key); });
@@ -29,6 +44,7 @@ function setup() {
       headers: new Headers({ Date: "Sun, 01 Nov 2026 00:00:00 GMT", ETag: etag }), json: async () => body });
     if (p === "/v1/me") return reply({ id: profile });
     if (p === "/v1/workspaces") return reply({ items: revoked ? [] : [{ id: workspace, name: "Casa" }], pageInfo: { hasNextPage: false } });
+    if (p === "/v1/notifications") return reply({ items: [], pageInfo: { hasNextPage: false, nextCursor: null } });
     if (p === path && init.method === "GET") return reply(defaults, preferencesStatus);
     const body = JSON.parse(String(init.body)), key = headers.get("Idempotency-Key");
     writes.push({ method: init.method, path: p, body, match: headers.get("If-Match"), key });
@@ -80,4 +96,88 @@ test.each([404, 501])("preferences and push can independently report unavailable
   expect(await screen.findByText("Preferencias de notificaciones no disponibles.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Guardar preferencias" })).toBeNull();
   await press("Registrar este dispositivo"); expect(await screen.findByText("Registro de notificaciones push no disponible.")).toBeTruthy();
+});
+
+const projectId = "abca0000-0000-4000-8000-000000000004";
+const permission = (granted: boolean, canAskAgain: boolean): Notifications.NotificationPermissionsStatus => ({
+  status: (granted ? "granted" : "denied") as Notifications.NotificationPermissionsStatus["status"], granted, canAskAgain, expires: "never",
+});
+afterEach(() => jest.restoreAllMocks());
+async function openDefaultRegistration(platform: "ios" | "android", projectConfig: "extra" | "eas" | "missing", development = false) {
+  const f = setup();
+  jest.replaceProperty(globalThis as typeof globalThis & { __DEV__: boolean }, "__DEV__", development);
+  jest.replaceProperty(Platform, "OS", platform);
+  jest.replaceProperty(Constants, "expoConfig", { name: "Savia", slug: "savia-mobile", version: token.appVersion,
+    extra: projectConfig === "extra" ? { eas: { projectId } } : undefined });
+  jest.replaceProperty(Constants, "easConfig", projectConfig === "eas" ? { projectId } : null);
+  mockReadSession.mockImplementation(f.read);
+  (sendRequest as unknown as jest.Mock).mockImplementation(f.send);
+  await render(<Index />);
+  await press("Notificaciones"); await press("Preferencias de notificaciones"); await screen.findByText("Resumen del lunes");
+  expect(Notifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+  expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(f.writes).toEqual([]);
+  f.read.mockClear(); f.send.mockClear(); jest.mocked(Storage.setItemAsync).mockClear();
+  return f;
+}
+
+test.each([["android", "extra"], ["ios", "eas"]] as const)("default registration on %s obtains an Expo token only after a tap", async (platform, projectConfig) => {
+  const f = await openDefaultRegistration(platform, projectConfig);
+  jest.mocked(Notifications.getPermissionsAsync).mockResolvedValueOnce(permission(platform === "ios", true));
+  if (platform === "android") jest.mocked(Notifications.requestPermissionsAsync).mockResolvedValueOnce(permission(true, true));
+  jest.mocked(Notifications.getExpoPushTokenAsync).mockResolvedValueOnce({ type: "expo", data: token.expoPushToken });
+  await press("Registrar este dispositivo"); await screen.findByText("Dispositivo registrado.");
+  if (platform === "android") {
+    expect(Notifications.setNotificationChannelAsync).toHaveBeenCalledTimes(1);
+    expect(Notifications.setNotificationChannelAsync).toHaveBeenCalledWith("savia", { name: "Savia", importance: Notifications.AndroidImportance.DEFAULT });
+    expect(Notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(Notifications.setNotificationChannelAsync).mock.invocationCallOrder[0])
+      .toBeLessThan(jest.mocked(Notifications.requestPermissionsAsync).mock.invocationCallOrder[0]);
+  } else {
+    expect(Notifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+    expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+  }
+  expect(Notifications.getExpoPushTokenAsync).toHaveBeenCalledTimes(1);
+  // Passing the SDK's default URL explicitly prevents SDK-managed background token updates.
+  expect(Notifications.getExpoPushTokenAsync).toHaveBeenCalledWith({ projectId, url: "https://exp.host/--/api/v2/push/getExpoPushToken" });
+  expect(f.writes).toEqual([{ path: push, method: "POST", body: { ...token, platform }, key: null, match: null }]);
+  expect(screen.queryByText(/synthetic-fixture/)).toBeNull(); expect(Storage.setItemAsync).not.toHaveBeenCalled();
+});
+
+test("default registration explains permission denial without requesting a token or writing", async () => {
+  const f = await openDefaultRegistration("ios", "extra");
+  jest.mocked(Notifications.getPermissionsAsync).mockResolvedValueOnce(permission(false, true));
+  jest.mocked(Notifications.requestPermissionsAsync).mockResolvedValueOnce(permission(false, false));
+  await press("Registrar este dispositivo");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Activa el permiso de notificaciones en los ajustes para registrar este dispositivo.");
+  expect(Notifications.requestPermissionsAsync).toHaveBeenCalledTimes(1);
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(f.read).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(screen.queryByText("Dispositivo registrado.")).toBeNull();
+});
+
+test("default registration makes no Expo calls from a development build", async () => {
+  const f = await openDefaultRegistration("android", "extra", true);
+  await press("Registrar este dispositivo");
+  expect(await screen.findByRole("alert")).toHaveTextContent("El registro push no está disponible en compilaciones de desarrollo.");
+  expect(Notifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+  expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(f.read).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(screen.queryByText("Dispositivo registrado.")).toBeNull();
+});
+
+test("default registration explains a missing project ID without prompting for permission", async () => {
+  const f = await openDefaultRegistration("android", "missing");
+  await press("Registrar este dispositivo");
+  expect(await screen.findByRole("alert")).toHaveTextContent("No se configuró el ID del proyecto Expo para registrar notificaciones.");
+  expect(Notifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+  expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.requestPermissionsAsync).not.toHaveBeenCalled();
+  expect(Notifications.getExpoPushTokenAsync).not.toHaveBeenCalled();
+  expect(f.read).not.toHaveBeenCalled(); expect(f.send).not.toHaveBeenCalled(); expect(f.writes).toEqual([]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(screen.queryByText("Dispositivo registrado.")).toBeNull();
 });

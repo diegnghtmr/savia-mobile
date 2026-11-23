@@ -46,6 +46,7 @@ import { NotificationInbox } from "../mobile-shell/notification-inbox";
 import { NotificationSettings } from "../mobile-shell/notification-settings";
 import { OfflineBanner } from "../mobile-shell/offline-banner";
 import { OutboxPanel } from "../mobile-shell/outbox-panel";
+import { defaultPushTokenSource } from "../mobile-shell/push-token-source";
 import { ReceiptsScreen } from "../mobile-shell/receipts-screen";
 import { ScenariosScreen } from "../mobile-shell/scenarios-screen";
 import { paletteFor } from "../mobile-shell/tokens";
@@ -55,7 +56,9 @@ import { TransfersScreen } from "../mobile-shell/transfers-screen";
 const transport = () => createTransport({ sessions: { read: () => getAuth().readSession() } });
 const offline = createOffline(createIdentity((operation) => transport().withSession(operation)), () => getAuth().localPrincipal?.() ?? Promise.resolve(null));
 
-export default function Index() { return <SaviaMobile statementSource={defaultStatementSource} imageSource={defaultReceiptSource} />; }
+export default function Index() {
+  return <SaviaMobile statementSource={defaultStatementSource} imageSource={defaultReceiptSource} pushTokenSource={defaultPushTokenSource} />;
+}
 
 type Sources = { statementSource?: StatementFileSource; imageSource?: ReceiptImageSource; pushTokenSource?: PushTokenSource };
 export function SaviaMobile(sources: Sources) {
