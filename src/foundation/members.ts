@@ -16,6 +16,12 @@ const date = (v: unknown): v is string => typeof v === "string" && Number.isFini
 const withoutHeader = { subjectResource: true } as const;
 const rosterUnavailable = "Miembros del espacio no disponibles.", invitesUnavailable = "Invitaciones no disponibles.";
 const noManage = "No tienes permiso para gestionar este espacio.";
+function memberRefusal(error: unknown): never {
+  if (error instanceof TransportError && error.kind === "http" && error.status === 409 && error.problemType === "https://savia.app/problems/last-owner-required") {
+    throw new InvalidDraft("El espacio debe conservar al menos un propietario activo.");
+  }
+  throw error;
+}
 function parseMember(raw: unknown) {
   const { id: value, userId, displayName, email, role: level, status, joinedAt } = fundRecord(raw), id = uuid(value);
   if (!id || !uuid(userId) || typeof displayName !== "string" || !role(level) || (status !== "active" && status !== "suspended") || !date(joinedAt)) throw new TypeError();
@@ -32,13 +38,12 @@ export type WorkspaceInvitation = ReturnType<typeof parseInvitation>;
 
 export function createMembers(request: ScopedRequest, workspace: string) {
   const scope = uuid(workspace) ?? "", root = `/v1/workspaces/${scope}`, roster = `${root}/members`, invites = `${root}/invitations`;
-  const call = onlineCapability(request, scope), invitationJournal = memoryPendingJournal();
+  const call = onlineCapability(request, scope), journal = memoryPendingJournal();
   let allowed: MemberRole[] = [];
   const http = (error: unknown, ...status: number[]) => error instanceof TransportError && error.kind === "http" && status.includes(error.status ?? 0);
-  function collection<T extends { id: string }>(path: string, unavailable: string, parse: (input: unknown) => T) {
+  function collection<T extends { id: string }>(path: string, unavailable: string, parse: (input: unknown) => T, valid: (value: unknown) => value is string) {
     const rows = new Map<string, T>(), seen = new Set<string>();
     return { rows, async load(cursor?: string) {
-      const valid = (value: unknown): value is string => isCursor(value, scope, undefined, true);
       if (cursor !== undefined && (!valid(cursor) || !seen.has(cursor))) throw new InvalidDraft("Página no válida.");
       if (!cursor) { rows.clear(); seen.clear(); }
       const query = new URLSearchParams({ limit: "20" }); if (cursor) query.set("cursor", cursor);
@@ -52,7 +57,8 @@ export function createMembers(request: ScopedRequest, workspace: string) {
       return { items: [...rows.values()], next };
     } };
   }
-  const members = collection(roster, rosterUnavailable, parseMember), invitations = collection(invites, invitesUnavailable, parseInvitation);
+  const members = collection(roster, rosterUnavailable, parseMember, (value): value is string => isCursor(value, scope, undefined, true));
+  const invitations = collection(invites, invitesUnavailable, parseInvitation, (value): value is string => isCursor(value, undefined, undefined, true));
   const editable = (row: WorkspaceMember) => members.rows.get(row.id) === row && allowed.includes(row.role);
   async function access() {
     allowed = [];
@@ -61,11 +67,11 @@ export function createMembers(request: ScopedRequest, workspace: string) {
     if (kind !== "personal" && (level === "owner" || level === "administrator")) allowed = roles.filter((value) => level === "owner" || value !== "owner");
     return allowed;
   }
-  async function write<T>(path: string, method: "POST" | "DELETE", status: number, body: object | undefined, parse: (input: unknown, serverDate: number | null) => T,
+  async function write<T>(path: string, method: "POST" | "DELETE", status: number, body: object | undefined, parse: (input: unknown) => T,
     confirmation?: PendingSubmissionExpired) {
     return await call(path, { ...withoutHeader, method, successStatus: status, body,
       submit: (profile, operation, serverDate) => pendingSubmission(scope, profile, JSON.stringify([method, path, body]),
-        async (key) => parse(await operation(key), serverDate), { serverDate, confirmation, journal: body ? invitationJournal : undefined }),
+        async (key) => parse(await operation(key)), { serverDate, confirmation, journal }),
     }, path.startsWith(invites) ? invitesUnavailable : rosterUnavailable, path === invites ? undefined : [501]) as T;
   }
   return {
@@ -78,12 +84,12 @@ export function createMembers(request: ScopedRequest, workspace: string) {
     async change(row: WorkspaceMember, level: unknown) {
       if (!editable(row) || !role(level) || !allowed.includes(level) || level === row.role) throw new InvalidDraft("Elige un rol distinto y disponible para este miembro.");
       // The roster has no row-version field. PATCH does not advertise an idempotency key.
-      const result = parseMember(await call(`${roster}/${row.id}`, { ...withoutHeader, method: "PATCH", body: { role: level }, successStatus: 200 }, rosterUnavailable, [501]));
+      const result = parseMember(await call(`${roster}/${row.id}`, { ...withoutHeader, method: "PATCH", body: { role: level }, successStatus: 200 }, rosterUnavailable, [501]).catch(memberRefusal));
       if (result.id !== row.id || result.role !== level) throw new TypeError();
     },
     async remove(row: WorkspaceMember, confirmation?: PendingSubmissionExpired) {
       if (!editable(row)) throw new InvalidDraft(noManage);
-      await write(`${roster}/${row.id}`, "DELETE", 204, undefined, () => {}, confirmation);
+      await write(`${roster}/${row.id}`, "DELETE", 204, undefined, () => {}, confirmation).catch(memberRefusal);
     },
     async invite(raw: string, level: MemberRole, confirmation?: PendingSubmissionExpired) {
       const email = raw.trim().toLowerCase();

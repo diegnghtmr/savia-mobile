@@ -18,7 +18,8 @@ const at = "2026-11-22T00:00:00.000000Z", cursor = Buffer.from(JSON.stringify([w
 const press = async (name: string) => fireEvent.press(await screen.findByRole("button", { name }));
 function setup(role = "administrator") {
   jest.clearAllMocks(); mockReadSession.mockResolvedValue({ accessToken: "fixture" });
-  const storage = new Map([[`savia.workspace.${profile}`, workspace]]);
+  // All tests in this suite share the native SQLite mock's in-memory file and key.
+  const storage = new Map([[`savia.workspace.${profile}`, workspace], ["savia.offline.key.v1", "a".repeat(64)]]);
   jest.mocked(Storage.getItemAsync).mockImplementation(async (key) => storage.get(key) ?? null);
   jest.mocked(Storage.setItemAsync).mockImplementation(async (key, value) => { storage.set(key, value); });
   jest.mocked(Storage.deleteItemAsync).mockImplementation(async (key) => { storage.delete(key); });
@@ -98,4 +99,123 @@ test("viewers get a read-only roster; absent or revoked workspaces do not expose
   await screen.findByText("No pudimos cargar la lista.");
   expect(f.fetch.mock.calls.map(([url]) => typeof url === "string" && new URL(url).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
   expect(f.writes).toEqual([]);
+});
+
+test("a lost member removal response reuses the in-memory key without writing a journal to disk", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  const keys: (string | null)[] = [];
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    if (new URL(url).pathname !== `${roster}/${member}` || init.method !== "DELETE") return normal(url, init);
+    keys.push(new Headers(init.headers).get("Idempotency-Key"));
+    if (keys.length === 1) throw new Error("response lost");
+    return normal(url, init);
+  });
+  await render(<Index />); await press("Miembros del espacio"); await press("Gestionar a Persona invitada");
+  await press("Eliminar miembro"); jest.mocked(Storage.setItemAsync).mockClear(); jest.mocked(Storage.deleteItemAsync).mockClear();
+  await press("Confirmar eliminación"); await screen.findByText("No pudimos eliminar al miembro.");
+  expect(screen.getByText("Persona invitada")).toBeTruthy();
+  await press("Confirmar eliminación"); await screen.findByText("Miembro eliminado.");
+  expect(keys).toEqual([expect.any(String), keys[0]]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(Storage.deleteItemAsync).not.toHaveBeenCalled();
+});
+
+// Reviewer regressions (verify mwtlm9y7). Append to __tests__/members.test.tsx.
+test("invitation pagination follows the unbound cursor emitted by the backend", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  const row = (n: number) => ({
+    id: `d0000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+    email: `invite${n}@fixture.invalid`, role: "viewer", status: "pending", expiresAt: at, createdAt: at,
+  });
+  const first = Array.from({ length: 20 }, (_, n) => row(n + 101));
+  const nextCursor = Buffer.from(JSON.stringify([at, first[19].id])).toString("base64url");
+  const received: (string | null)[] = [];
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    const { pathname, searchParams } = new URL(url);
+    if (pathname !== invitations || init.method !== "GET") return normal(url, init);
+    const cursor = searchParams.get("cursor"); received.push(cursor);
+    expect(searchParams.get("limit")).toBe("20");
+    expect(new Headers(init.headers).get("X-Workspace-Id")).toBeNull();
+    return { status: 200, ok: true, redirected: false, headers: new Headers(), json: async () => cursor === nextCursor
+      ? { items: [row(121)], pageInfo: { hasNextPage: false, nextCursor: null } }
+      : { items: first, pageInfo: { hasNextPage: true, nextCursor } } };
+  });
+  await render(<Index />); await press("Miembros del espacio"); await press("Ver invitaciones");
+  await press("Más invitaciones"); await screen.findByText("invite121@fixture.invalid");
+  expect(screen.getByText("invite101@fixture.invalid")).toBeTruthy();
+  expect(received).toEqual([null, nextCursor]);
+});
+
+test.each(["PATCH", "DELETE"])("%s shows the backend last-owner refusal without reporting success", async (method) => {
+  const f = setup("owner"), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  const calls: string[] = [];
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === roster && init.method === "GET") return {
+      status: 200, ok: true, redirected: false, headers: new Headers(), json: async () => ({
+        items: [{ id: owner, userId: profile, displayName: "Última propietaria", role: "owner", status: "active", joinedAt: at }],
+        pageInfo: { hasNextPage: false, nextCursor: null },
+      }),
+    };
+    if (path !== `${roster}/${owner}`) return normal(url, init);
+    calls.push(init.method!);
+    expect(init.method).toBe(method);
+    if (method === "PATCH") expect(JSON.parse(String(init.body))).toEqual({ role: "editor" });
+    else expect(new Headers(init.headers).get("Idempotency-Key")).toEqual(expect.any(String));
+    return { status: 409, ok: false, redirected: false, headers: new Headers({ "Content-Type": "application/problem+json" }),
+      json: async () => ({ type: "https://savia.app/problems/last-owner-required",
+        title: "Collaborative workspace requires at least one active owner", status: 409 }) };
+  });
+  await render(<Index />); await press("Miembros del espacio"); await press("Gestionar a Última propietaria");
+  if (method === "PATCH") { await press("Rol: Editor"); await press("Guardar rol"); }
+  else { await press("Eliminar miembro"); expect(calls).toEqual([]); await press("Confirmar eliminación"); }
+  const alert = await screen.findByRole("alert");
+  expect(calls).toEqual([method]);
+  expect(screen.getByText("Propietario · Activo")).toBeTruthy();
+  expect(screen.queryByText(/^(Rol actualizado|Miembro eliminado)\.$/)).toBeNull();
+  expect(alert).toHaveTextContent("El espacio debe conservar al menos un propietario activo.");
+});
+
+test("a lost invitation response reuses its key without touching durable journals or the offline cache or outbox", async () => {
+  const f = setup(); await render(<Index />); await press("Miembros del espacio"); await press("Ver invitaciones");
+  await screen.findByText("No hay invitaciones.");
+  const { offlineStore } = require("../src/foundation/offline-db") as typeof import("../src/foundation/offline-db");
+  const store = offlineStore();
+  const snapshot = () => store(async (db) => JSON.stringify([
+    await db.getAllAsync("SELECT * FROM cache ORDER BY rowid"), await db.getAllAsync("SELECT * FROM outbox ORDER BY id"),
+  ]));
+  const before = await snapshot();
+  jest.mocked(Storage.setItemAsync).mockClear(); jest.mocked(Storage.deleteItemAsync).mockClear();
+  fireEvent.changeText(screen.getByLabelText("Correo de invitación"), email);
+  for (let n = 0; n < 2; n++) {
+    await press("Enviar invitación"); await screen.findByText("No pudimos enviar la invitación.");
+    expect(await snapshot()).toBe(before);
+    expect(Storage.setItemAsync).not.toHaveBeenCalled(); expect(Storage.deleteItemAsync).not.toHaveBeenCalled();
+  }
+  expect(f.writes[1]).toEqual(f.writes[0]);
+  f.revoke(); f.fetch.mockClear(); await press("Enviar invitación");
+  await screen.findByText("No pudimos enviar la invitación.");
+  expect(f.fetch.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(["/v1/me", "/v1/workspaces"]);
+  expect(f.writes).toHaveLength(2);
+  expect(await snapshot()).toBe(before);
+});
+
+test("a lost invitation revocation response leaves no durable retry fingerprint", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  const revoke = `${invitations}/${inviteId}/revoke`, keys: (string | null)[] = [];
+  mock.mockImplementation(async (url: string, init: RequestInit) => {
+    if (new URL(url).pathname !== revoke) return normal(url, init);
+    keys.push(new Headers(init.headers).get("Idempotency-Key"));
+    throw new Error("response lost");
+  });
+  await render(<Index />); await press("Miembros del espacio"); await press("Ver invitaciones");
+  await screen.findByText("No hay invitaciones.");
+  fireEvent.changeText(screen.getByLabelText("Correo de invitación"), email);
+  for (let n = 0; n < 3; n++) await press("Enviar invitación");
+  await screen.findByText("Invitación enviada.");
+  jest.mocked(Storage.setItemAsync).mockClear();
+  await press(`Revocar invitación: ${email}`); await press("Confirmar revocación");
+  await screen.findByText("No pudimos revocar la invitación.");
+  await press("Confirmar revocación"); await screen.findByText("No pudimos revocar la invitación.");
+  expect(keys).toEqual([expect.any(String), keys[0]]);
+  expect(Storage.setItemAsync).not.toHaveBeenCalled();
 });

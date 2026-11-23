@@ -42,11 +42,11 @@ export type SaviaRequest = (path: string, input?: RequestInput) => Promise<unkno
 export type WithSession = <T>(operation: (request: SaviaRequest) => Promise<T>) => Promise<T>;
 
 export class TransportError extends Error {
-  constructor(readonly kind: "http" | "network" | "redirect" | "timeout" | "protocol", readonly status?: number, readonly code?: string) {
+  constructor(readonly kind: "http" | "network" | "redirect" | "timeout" | "protocol", readonly status?: number, readonly code?: string, readonly problemType?: string) {
     super("Savia API request failed");
     this.name = "TransportError";
   }
-  toJSON() { return { kind: this.kind, status: this.status, code: this.code, message: this.message }; }
+  toJSON() { return { kind: this.kind, status: this.status, code: this.code, problemType: this.problemType, message: this.message }; }
 }
 
 export const isOfflineFailure = (error: unknown) => error instanceof TransportError && (error.kind === "network" || error.kind === "timeout");
@@ -130,9 +130,11 @@ export function createTransport({
         return workspace?.includeETag ? { body: decoded, etag: response.headers.get("etag") } : decoded;
       }
       const isProblem = /^application\/problem\+json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "");
-      const code: unknown = isProblem ? (await response.json().catch(() => null))?.code : undefined;
+      const problem = isProblem ? await response.json().catch(() => null) as { code?: unknown; type?: unknown } | null : null;
+      const code = problem?.code, type = problem?.type;
       const safeCode = typeof code === "string" && /^[a-z][a-z0-9_-]{0,63}$/i.test(code) && !code.includes(token) ? code : undefined;
-      throw new TransportError("http", response.status, safeCode);
+      const problemType = typeof type === "string" && /^https:\/\/savia\.app\/problems\/[a-z][a-z0-9-]{0,95}$/.test(type) && !type.includes(token) ? type : undefined;
+      throw new TransportError("http", response.status, safeCode, problemType);
     }, timeoutMs);
   }
   const bind = (token: string): SaviaRequest => (path, options) => execute(token, path, options);

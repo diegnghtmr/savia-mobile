@@ -85,6 +85,20 @@ test("maps problem JSON without trusting its status or echoing its detail", asyn
   expect(JSON.parse(JSON.stringify(error))).toEqual({ kind: "http", status: 404, code: "profile_not_found", message: "Savia API request failed" });
 });
 
+test("retains a canonical Savia problem type without exposing arbitrary response text", async () => {
+  const problemType = "https://savia.app/problems/last-owner-required";
+  const { client } = setup(409, { status: 200, type: problemType, detail: "private" }, "application/problem+json");
+  const error = await client.request("/v1/me").catch((value: unknown) => value);
+  expect(error).toMatchObject({ kind: "http", status: 409, problemType });
+  expect(JSON.stringify(error)).not.toContain("private");
+  for (const type of [`${problemType}?value=private`, `https://savia.app/problems/${credentials.accessToken}`]) {
+    const { client } = setup(409, { type }, "application/problem+json");
+    const unsafe = await client.request("/v1/me").catch((value: unknown) => value);
+    expect(JSON.stringify(unsafe)).not.toContain(type);
+    expect(unsafe).not.toMatchObject({ problemType: type });
+  }
+});
+
 test("rejects a redirect response before consuming its body", async () => {
   const { client, response } = setup(302);
   await expect(client.request("/v1/me")).rejects.toMatchObject({ kind: "redirect" });

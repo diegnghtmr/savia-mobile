@@ -148,3 +148,25 @@ test("ordinary rotation failure clears the replacement secret on the still-visib
   expect(capabilityWrites()).toEqual([]);
   expect(screen.getByLabelText("Nuevo secreto (opcional)").props.value.length).toBe(0);
 });
+
+// Reviewer regression (verify mwtlm9y7). Append to __tests__/ai-credentials.test.tsx.
+test("registration clears private fields before the request settles", async () => {
+  const f = setup(), mock = f.fetch as unknown as jest.Mock, normal = mock.getMockImplementation()!;
+  let finish!: (result: unknown) => void;
+  const held = new Promise((resolve) => { finish = resolve; });
+  mock.mockImplementation(async (url: string, init: RequestInit) => new URL(url).pathname === credentials && init.method === "POST"
+    ? held : normal(url, init));
+  await render(<Index />); await press("Credenciales de IA"); await screen.findByText("No hay credenciales guardadas.");
+  await press("OpenAI · api_key");
+  await type("Secreto del proveedor", oldSecret);
+  await type("Metadatos JSON (opcional)", '{"note":"private"}');
+  await press("Agregar credencial");
+  try {
+    expect(screen.getByLabelText("Secreto del proveedor").props.value).toBe("");
+    expect(screen.getByLabelText("Metadatos JSON (opcional)").props.value).toBe("");
+  } finally {
+    finish({ status: 503, ok: false, redirected: false, headers: new Headers(), json: async () => ({}) });
+    await screen.findByText("No pudimos guardar la credencial.");
+  }
+  expect(capabilityWrites()).toEqual([]);
+});
