@@ -1,9 +1,11 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { InvalidDraft } from "../foundation/identity-draft";
+import type { BulkTransactions } from "../foundation/transaction-bulk";
 import { type Filters, type LedgerDraft, type Transactions, statuses, types } from "../foundation/transactions";
 import { AuthAction, AuthPanel } from "./auth-gate";
 import { paletteFor } from "./tokens";
+import { TransactionBulkPanel } from "./transaction-bulk-panel";
 import { useVisibleApi } from "./use-visible-api";
 import { confirmPendingLabel, usePendingWrite } from "./use-pending-write";
 
@@ -66,6 +68,8 @@ function Editor({ api, baseline, blocked, cancelDisabled, save, back }: { api: T
         <Field label="Importe" value={values.amount ?? ""} change={(text) => choose("amount", text)} disabled={blocked} /></>}
       <Field label="Fecha (AAAA-MM-DD, UTC)" value={values.date ?? ""} change={(text) => choose("date", text)} disabled={blocked} />
       <Field label="Descripción" value={values.description ?? ""} change={(text) => choose("description", text)} disabled={blocked} />
+      {!creating && <AuthAction label="Extraordinario" selected={values.extraordinary === true} disabled={blocked}
+        action={() => choose("extraordinary", values.extraordinary !== true)} />}
       {choices("categoryId", "Categoría", options.categories, "Sin categoría")}{choices("payeeId", "Contraparte", options.payees, "Sin contraparte")}
       <Copy>Etiquetas</Copy>{Array.from(options.tags, ([id, name]) => <AuthAction key={id} label={name} disabled={blocked} selected={values.tagIds?.includes(id) ?? false}
         action={() => { const tags = values.tagIds ?? []; choose("tagIds", tags.includes(id) ? tags.filter((tag) => tag !== id) : [...tags, id].sort()); }} />)}
@@ -96,6 +100,7 @@ function Detail({ api, id, back, changed }: { api: Transactions; id: string; bac
     {data === null ? <><Copy role="alert">No pudimos cargar el movimiento.</Copy><AuthAction label="Reintentar" action={reload} /></>
       : !data ? <Copy>Cargando movimiento…</Copy> : <>
         <Copy role="header">{data.title}</Copy><Copy>{data.type} · {data.status}</Copy><Copy>{data.occurredAt}</Copy><Copy>{data.amount}</Copy>
+        {data.extraordinary && <Copy>Movimiento extraordinario</Copy>}
         {data.equivalent && <Copy>Equivalente en moneda base: {data.equivalent}</Copy>}
         <Copy>Cuenta: {data.account}</Copy><Copy>Categoría: {data.category ?? "Sin categoría"}</Copy><Copy>Contraparte: {data.payee ?? "Sin contraparte"}</Copy>
         {data.tags.length > 0 && <Copy>Etiquetas: {data.tags.join(", ")}</Copy>}{data.notes && <Copy>{data.notes}</Copy>}
@@ -121,7 +126,7 @@ function Detail({ api, id, back, changed }: { api: Transactions; id: string; bac
   </>;
 }
 
-export function TransactionsScreen({ api, back, startCreating = false, nextView }: { api: Transactions; back: () => void; startCreating?: boolean; nextView?: () => Transactions }) {
+export function TransactionsScreen({ api, bulk, back, startCreating = false, nextView }: { api: Transactions; bulk?: BulkTransactions; back: () => void; startCreating?: boolean; nextView?: () => Transactions }) {
   const view = useVisibleApi(api, nextView);
   const colors = paletteFor(useColorScheme());
   const [showFilters, toggleFilters] = useState(false);
@@ -130,6 +135,7 @@ export function TransactionsScreen({ api, back, startCreating = false, nextView 
   const [draft, setDraft] = useState<Filters>({ limit: "20" });
   const [applied, setApplied] = useState<Filters>({});
   const [visible, setVisible] = useState<string>();
+  const [selecting, selectBulk] = useState(false), [bulkNotice, setBulkNotice] = useState<{ text: string; conflict?: true }>();
   const [creating, setCreating] = useState(startCreating);
   const create = (next: boolean) => { view.move(); setCreating(next); };
   const write = usePendingWrite(undefined, () => create(false));
@@ -139,12 +145,12 @@ export function TransactionsScreen({ api, back, startCreating = false, nextView 
   const [error, setError] = useState("");
   const sequence = useRef(0), seen = useRef(new Set<string>());
   const retry = useRef<() => void>(undefined);
-  async function load(filters: Filters, cursor?: string) {
+  async function load(filters: Filters, cursor?: string, onlineOnly?: true) {
     const operation = ++sequence.current;
     setBusy(true); setError("");
     if (!cursor) setPage(emptyPage);
     try {
-      const result = await view.api().list({ ...filters, ...(cursor && { cursor }) });
+      const result = await view.api().list({ ...filters, ...(cursor && { cursor }) }, onlineOnly);
       if (sequence.current !== operation) return;
       if (cursor && (result.items.some(({ id }) => page.items.some((row) => row.id === id)) || (result.nextCursor && seen.current.has(result.nextCursor)))) throw new TypeError();
       if (cursor) seen.current.add(cursor); else seen.current.clear();
@@ -153,7 +159,7 @@ export function TransactionsScreen({ api, back, startCreating = false, nextView 
     } catch (failure) {
       if (sequence.current !== operation) return;
       const invalid = failure instanceof InvalidDraft;
-      retry.current = invalid ? undefined : () => void load(filters, cursor);
+      retry.current = invalid ? undefined : () => void load(filters, cursor, onlineOnly);
       setError(invalid ? failure.message : "No pudimos cargar los movimientos.");
     } finally { if (sequence.current === operation) setBusy(false); }
   }
@@ -174,9 +180,15 @@ export function TransactionsScreen({ api, back, startCreating = false, nextView 
   if (picker) return <AuthPanel><Picker api={view.api()} field={picker} back={() => { view.move(); setPicker(undefined); }} choose={(id, name) => {
     view.move(); setSelected((old) => ({ ...old, [picker]: name })); change(picker, id); setPicker(undefined);
   }} /></AuthPanel>;
+  if (bulk && selecting) return <TransactionBulkPanel api={bulk} items={page.items} back={() => selectBulk(false)} loading={busy}
+    more={page.nextCursor && !error ? () => void load(applied, page.nextCursor!, true) : undefined} finish={(text, conflict) => {
+      selectBulk(false); setBulkNotice({ text, conflict }); void load(applied, undefined, true);
+    }} />;
   return <AuthPanel>
     <Copy role="header">Movimientos</Copy><AuthAction label="Volver al resumen" action={back} />
     <AuthAction label="Nuevo movimiento" action={() => { write.clear(); create(true); }} disabled={busy} />
+    {bulk && page.items.some(({ version }) => version !== null) && <AuthAction label="Acciones en lote" disabled={busy} action={() => { setBulkNotice(undefined); selectBulk(true); }} />}
+    {bulkNotice && <Copy role={bulkNotice.conflict ? "alert" : undefined}>{bulkNotice.text}</Copy>}
     {write.error && <Copy role="alert">{write.error}</Copy>}
     <AuthAction label="Filtros" selected={showFilters} action={() => toggleFilters(!showFilters)} />
     {showFilters && <>

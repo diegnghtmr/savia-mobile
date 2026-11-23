@@ -10,6 +10,7 @@ import { getAuth } from "../foundation/auth";
 import { createBudgetWrites } from "../foundation/budget-writes";
 import { createBudgets } from "../foundation/budgets";
 import { createCatalogWrites } from "../foundation/catalog-writes";
+import { createDashboardPreferences } from "../foundation/dashboard-preferences";
 import { createDataJobs } from "../foundation/data-jobs";
 import { createDebtPayments } from "../foundation/debt-payments";
 import { createDebts } from "../foundation/debts";
@@ -28,7 +29,9 @@ import { createReceiptConfirmations } from "../foundation/receipt-confirmations"
 import { createReceipts, type ReceiptImageSource } from "../foundation/receipts";
 import { createRecurringRules } from "../foundation/recurring-rules";
 import { createScenarios } from "../foundation/scenarios";
+import { createSessions } from "../foundation/sessions";
 import { createSubscriptions } from "../foundation/subscriptions";
+import { createBulkTransactions } from "../foundation/transaction-bulk";
 import { createTransactions } from "../foundation/transactions";
 import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
@@ -57,6 +60,7 @@ import { defaultPushTokenSource } from "../mobile-shell/push-token-source";
 import { ReceiptsScreen } from "../mobile-shell/receipts-screen";
 import { RecurringRulesScreen } from "../mobile-shell/recurring-rules-screen";
 import { ScenariosScreen } from "../mobile-shell/scenarios-screen";
+import { SessionsScreen } from "../mobile-shell/sessions-screen";
 import { SubscriptionsScreen } from "../mobile-shell/subscriptions-screen";
 import { paletteFor } from "../mobile-shell/tokens";
 import { TransactionsScreen } from "../mobile-shell/transactions-screen";
@@ -72,12 +76,12 @@ export default function Index() {
 type Sources = { statementSource?: StatementFileSource; imageSource?: ReceiptImageSource; pushTokenSource?: PushTokenSource };
 export function SaviaMobile(sources: Sources) {
   return <AuthGate auth={getAuth} identity={offline.identity} signOut={offline.signOut}
-    home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
+    home={({ id }, profile, signOutAll) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} signOutAll={signOutAll} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members" | "subscriptions" | "recurring-rules" | "data-jobs" | "catalog-writes";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant" | "ai-credentials" | "access" | "members" | "subscriptions" | "recurring-rules" | "data-jobs" | "catalog-writes" | "sessions";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
-function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
+function WorkspaceHome({ id, profile, signOutAll, statementSource, imageSource, pushTokenSource }: { id: string; profile: string; signOutAll: () => Promise<void> } & Sources) {
   const latest = useRef(0);
   const [{ route, generation }, navigate] = useState<{ route: Route; generation: number }>({ route: "home", generation: 0 });
   const [snapshot, setSnapshot] = useState<{ generation: number; at: number | null }>();
@@ -87,6 +91,10 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
   const accountWrites = useMemo(() => createAccounts(background, id), [background, id]);
   const dataJobs = useMemo(() => createDataJobs(background, id), [background, id]);
   const catalogWrites = useMemo(() => createCatalogWrites(background, id), [background, id]);
+  const sessions = useMemo(() => createSessions(background, id), [background, id]);
+  const preferences = useMemo(() => createDashboardPreferences(background, id), [background, id]);
+  const bulk = useMemo(() => createBulkTransactions(background, id,
+    createTransactions((expected, path, options) => background(expected, path, { ...options, onlineOnly: true }), id).formOptions), [background, id]);
   const [fundJournal] = useState(memoryPendingJournal);
   const apis = useMemo(() => {
     const publish = (at: number | null, merge = false) => {
@@ -128,12 +136,13 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
   }, [accountWrites, box, profile, id, generation, fundJournal]);
   const back = () => show("home");
   return <><OfflineBanner savedAt={snapshot?.generation === generation ? snapshot.at : null} /><OutboxPanel box={box} />{route === "accounts" ? <AccountsScreen api={apis.accounts} nextView={apis.accountViews} back={back} />
-    : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} nextView={apis.transactionViews} back={back} startCreating={route === "new-transaction"} />
+    : route === "transactions" || route === "new-transaction" ? <TransactionsScreen api={apis.transactions} bulk={bulk} nextView={apis.transactionViews} back={back} startCreating={route === "new-transaction"} />
     : route === "transfers" ? <TransfersScreen api={apis.transfers} back={back} />
     : route === "budgets" ? <BudgetsScreen api={apis.budgets} nextView={apis.budgetViews} writes={apis.budgetWrites} back={back} />
     : route === "funds" ? <FundsScreen {...apis.funds} nextView={apis.fundViews} back={back} />
     : route === "debts" ? <DebtsScreen {...apis.debts} nextView={apis.debtViews} back={back} />
-    : route === "dashboard" ? <DashboardScreen api={apis.analytics} back={back} />
+    : route === "dashboard" ? <DashboardScreen api={apis.analytics} preferences={preferences} back={back}
+      links={{ account_balances: () => show("accounts"), alerts: () => show("notifications"), reconciliation_status: () => show("transactions") }} />
     : route === "analytics" ? <AnalyticsScreen api={apis.analytics} back={back} />
     : route === "forecasts" ? <ForecastsScreen api={apis.forecasts} back={back} />
     : route === "scenarios" ? <ScenariosScreen api={apis.scenarios} back={back} />
@@ -149,11 +158,12 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
     : route === "recurring-rules" ? <RecurringRulesScreen api={apis.recurringRules} back={back} />
     : route === "data-jobs" ? <DataJobsScreen api={dataJobs} back={back} />
     : route === "catalog-writes" ? <CatalogWritesScreen api={catalogWrites} back={back} />
-    : <HomeScreen openCatalogWrites={() => show("catalog-writes")} openDataJobs={() => show("data-jobs")} openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} openSubscriptions={() => show("subscriptions")} openRecurringRules={() => show("recurring-rules")} />}</>;
+    : route === "sessions" ? <SessionsScreen api={sessions} back={back} signOutAll={signOutAll} />
+    : <HomeScreen openSessions={() => show("sessions")} openCatalogWrites={() => show("catalog-writes")} openDataJobs={() => show("data-jobs")} openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} openAICredentials={() => show("ai-credentials")} openAccess={() => show("access")} openMembers={() => show("members")} openSubscriptions={() => show("subscriptions")} openRecurringRules={() => show("recurring-rules")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void; openSubscriptions?: () => void; openRecurringRules?: () => void; openDataJobs?: () => void; openCatalogWrites?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers, openSubscriptions, openRecurringRules, openDataJobs, openCatalogWrites }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void; openAICredentials?: () => void; openAccess?: () => void; openMembers?: () => void; openSubscriptions?: () => void; openRecurringRules?: () => void; openDataJobs?: () => void; openCatalogWrites?: () => void; openSessions?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant, openAICredentials, openAccess, openMembers, openSubscriptions, openRecurringRules, openDataJobs, openCatalogWrites, openSessions }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -191,6 +201,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openAICredentials && <AuthAction label="Credenciales de IA" action={openAICredentials} />}
         {openAccess && <AuthAction label="Accesos de MCP y CLI" action={openAccess} />}
         {openMembers && <AuthAction label="Miembros del espacio" action={openMembers} />}
+        {openSessions && <AuthAction label="Sesiones" action={openSessions} />}
       </ScrollView>
     </SafeAreaView>
   );

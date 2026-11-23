@@ -1,4 +1,5 @@
 import type { ScopedRequest } from "./accounts";
+import { dashboardDisplay, dashboardPreferencesPath } from "./dashboard-preferences";
 import type { Identity } from "./identity";
 import { workspaceUnavailable } from "./identity-draft";
 import { atomic, membershipChangedAfter, nextOfflineSequence, OfflineStorageUnavailable, offlineStore, purgeOfflineScope } from "./offline-db";
@@ -140,7 +141,8 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
         const owner = await optional(principal()), started = owner ? await stamp() : null;
         let observed = started;
         const key = `${options?.includeETag ? "etag:" : ""}${path}`;
-        const read = !options?.onlineOnly && (options?.method ?? "GET") === "GET" && cacheable.test(path);
+        const preferences = path === dashboardPreferencesPath && !options?.includeETag;
+        const read = !options?.onlineOnly && (options?.method ?? "GET") === "GET" && (preferences || cacheable.test(path));
         const current = async () => owner !== null && ticket === epoch && await optional(principal()) === owner;
         try {
           const payload = await request(workspace, path, { ...options, expectedProfile: profile, onMembership: async (context) => {
@@ -153,9 +155,10 @@ export function createOffline(identity: Identity, principal: () => Promise<strin
           if (owner && receivedAfter !== null) await store(async (db) => {
             if (ticket !== epoch || await membershipChangedAfter(db, owner, profile, workspace, receivedAfter)) throw new Error(workspaceUnavailable);
             if (!read) return;
+            const display = preferences ? dashboardDisplay(payload) : payload;
             await optional(db.runAsync(`INSERT OR REPLACE INTO cache SELECT ?, ?, ?, ?, ?, ? FROM membership
               WHERE principal = ? AND profile = ? AND json_extract(snapshot, '$.active.id') = ?`, owner, profile, workspace, key,
-              JSON.stringify(payload), Date.now(), owner, profile, workspace));
+              JSON.stringify(display), Date.now(), owner, profile, workspace));
             await optional(db.runAsync(`DELETE FROM cache WHERE rowid IN (SELECT rowid FROM cache WHERE principal = ? AND profile = ? AND workspace = ?
               ORDER BY saved_at DESC, rowid DESC LIMIT -1 OFFSET 100)`, owner, profile, workspace));
           });

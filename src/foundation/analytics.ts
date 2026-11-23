@@ -1,7 +1,10 @@
 import { isDay, money, type ScopedRequest } from "./accounts";
+import { advancedMetrics, parseAdvancedMetric } from "./advanced-analytics";
 import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
+import { parseFxRatesUsed } from "./fx-rates";
 import { InvalidDraft } from "./identity-draft";
+import { onlineCapability } from "./online-capability";
 import { isOfflineFailure, TransportError } from "./transport";
 import { uuid } from "./workspace-context";
 
@@ -24,7 +27,35 @@ export function reportPercent(value: unknown) {
   return `${value.toLocaleString("es", { useGrouping: false, maximumFractionDigits: 2 })} %`;
 }
 
-function categories(input: unknown, currency: string) {
+export const cashGranularities = { day: "Día", week: "Semana", month: "Mes", quarter: "Trimestre", year: "Año" } as const;
+export const analyticsFilterLabels = { accountIds: "Cuentas", categoryIds: "Categorías", tagIds: "Etiquetas", payeeIds: "Contrapartes", memberIds: "Miembros" } as const;
+export type AnalyticsFilterKey = keyof typeof analyticsFilterLabels;
+const unavailable = "Esta función no está disponible en este servidor.";
+function analyticsFilters(query: URLSearchParams, input: Record<string, unknown>, extra?: string) {
+  if (Object.keys(input).some((key) => key !== extra && key !== "presentationCurrency" && !Object.hasOwn(analyticsFilterLabels, key))) throw new TypeError();
+  const currency = input.presentationCurrency;
+  if (currency !== undefined && typeof currency !== "string") throw new TypeError();
+  const normalized = currency?.trim().toUpperCase();
+  if (normalized) {
+    if (!ACTIVE_CURRENCIES.has(normalized)) throw new TypeError();
+    query.set("presentationCurrency", normalized);
+  }
+  for (const field of Object.keys(analyticsFilterLabels)) {
+    const value = input[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string") throw new TypeError();
+    if (!value.trim()) continue;
+    const seen = new Set<string>();
+    for (const part of value.split(",")) {
+      const id = uuid(part.trim().toLowerCase());
+      if (!id || seen.has(id)) throw new TypeError();
+      seen.add(id); query.append(field, id);
+    }
+  }
+  return normalized || undefined;
+}
+
+function categories(input: unknown, currency?: string) {
   const row = reportRecord(input);
   if (!Array.isArray(row.series) || !Array.isArray(row.categories)) throw new TypeError();
   const seen = new Set<string>();
@@ -33,6 +64,18 @@ function categories(input: unknown, currency: string) {
     if (!id || seen.has(id) || typeof categoryName !== "string" || !categoryName.trim()) throw new TypeError();
     seen.add(id);
     return { id, name: categoryName, amount: money(amount, currency), percent: reportPercent(percentage) };
+  });
+}
+function cashSeries(input: unknown, currency?: string) {
+  if (!Array.isArray(input)) throw new TypeError();
+  const seen = new Set<string>();
+  return input.map((item: unknown) => {
+    const { period, value, secondaryValue } = reportRecord(item);
+    if (typeof period !== "string" || !period.trim() || seen.has(period)) throw new TypeError();
+    seen.add(period);
+    const expected = currency ?? reportRecord(value).currency;
+    if (typeof expected !== "string") throw new TypeError();
+    return { period, net: money(value, expected), cumulative: secondaryValue === undefined ? null : money(secondaryValue, expected) };
   });
 }
 function monthlySeries(input: Record<string, unknown>, period: ReportPeriod, currency: string) {
@@ -102,23 +145,25 @@ export function createAnalytics(request: ScopedRequest, workspace: string, batch
     if (!scope) throw new InvalidDraft("Espacio no válido.");
     return scope;
   }
-  async function summaryFor(request: ScopedRequest, scope: string, period: ReportPeriod) {
-    const row = reportRecord(await request(scope, `${reportsPath}/summary?${new URLSearchParams(period)}`, { successStatus: 200 }));
+  async function summaryFor(request: ScopedRequest, scope: string, period: ReportPeriod, presentationCurrency?: string) {
+    const query = new URLSearchParams({ ...period, ...(presentationCurrency && { presentationCurrency }) });
+    const row = reportRecord(await request(scope, `${reportsPath}/summary?${query}`, { successStatus: 200 }));
     const currency = row.baseCurrency;
     if (row.periodStart !== period.from || row.periodEnd !== period.to || typeof currency !== "string" || !ACTIVE_CURRENCIES.has(currency)) throw new TypeError();
     const amount = (key: string) => money(row[key], currency);
     return { period, currency, netWorth: amount("netWorth"), income: amount("income"), expenses: amount("expenses"), netFlow: amount("savingsCapacity"),
       assets: row.assets === undefined ? null : amount("assets"), debts: row.debts === undefined ? null : amount("debts"),
-      budget: row.budgetUtilizationPercent === undefined ? null : reportPercent(row.budgetUtilizationPercent) };
+      budget: row.budgetUtilizationPercent === undefined ? null : reportPercent(row.budgetUtilizationPercent), fxRatesUsed: parseFxRatesUsed(row.fxRatesUsed) };
   }
   return {
     async summary(input: unknown) { const period = reportPeriod(input); return summaryFor(request, target(), period); },
-    async dashboard(input: unknown, next: unknown) {
+    async dashboard(input: unknown, next: unknown, presentationCurrency?: string) {
       const period = reportPeriod(input), future = reportPeriod(next), scope = target();
+      if (presentationCurrency !== undefined && !ACTIVE_CURRENCIES.has(presentationCurrency)) throw new InvalidDraft("Revisa la moneda de presentación.");
       return batch(async (get) => {
-        const summary = await summaryFor(get, scope, period), metric = "financial_calendar";
+        const summary = await summaryFor(get, scope, period, presentationCurrency), metric = "financial_calendar";
         const upcoming = await optionalSection(async () => {
-          const raw = await get(scope, `${reportsPath}/advanced?${new URLSearchParams({ ...future, metric })}`, { successStatus: 200 });
+          const raw = await get(scope, `${reportsPath}/advanced?${new URLSearchParams({ ...future, metric, ...(presentationCurrency && { presentationCurrency }) })}`, { successStatus: 200 });
           return scheduledRecurring(advancedData(raw, metric), future, summary.currency);
         });
         const subscriptions = await optionalSection(async () => subscriptionPreview(
@@ -133,8 +178,35 @@ export function createAnalytics(request: ScopedRequest, workspace: string, batch
         const metric = "monthly_savings_capacity";
         const cash = await get(scope, `${reportsPath}/cash-flow?${new URLSearchParams(period)}`, { successStatus: 200 });
         const monthly = await get(scope, `${reportsPath}/advanced?${new URLSearchParams({ ...period, metric })}`, { successStatus: 200 });
-        return { summary, categories: categories(cash, summary.currency), months: monthlySeries(advancedData(monthly, metric), period, summary.currency) };
+        return { summary, categories: categories(cash, summary.currency), months: monthlySeries(advancedData(monthly, metric), period, summary.currency),
+          cashRates: parseFxRatesUsed(reportRecord(cash).fxRatesUsed), monthlyRates: parseFxRatesUsed(reportRecord(monthly).fxRatesUsed) };
       });
+    },
+    async cashFlow(input: unknown, filters: unknown = {}) {
+      const period = reportPeriod(input), query = new URLSearchParams(period);
+      let currency: string | undefined;
+      try {
+        const draft = reportRecord(filters), granularity = draft.granularity === undefined ? "month" : draft.granularity;
+        if (typeof granularity !== "string" || !Object.hasOwn(cashGranularities, granularity)) throw new TypeError();
+        query.set("granularity", granularity);
+        currency = analyticsFilters(query, draft, "granularity");
+      } catch { throw new InvalidDraft("Revisa los filtros de analítica."); }
+      const call = onlineCapability(request, target());
+      const row = reportRecord(await call(`${reportsPath}/cash-flow?${query}`, { successStatus: 200, onlineOnly: true }, unavailable));
+      return { series: cashSeries(row.series, currency), categories: categories(row, currency), fxRatesUsed: parseFxRatesUsed(row.fxRatesUsed) };
+    },
+    async advanced(input: unknown, metric: unknown, filters: unknown = {}) {
+      const period = reportPeriod(input);
+      const valid = (key: unknown): key is keyof typeof advancedMetrics => typeof key === "string" && Object.hasOwn(advancedMetrics, key);
+      if (!valid(metric)) throw new InvalidDraft("Selecciona una métrica válida.");
+      const query = new URLSearchParams({ ...period, metric });
+      let currency: string | undefined;
+      try { currency = analyticsFilters(query, reportRecord(filters)); }
+      catch { throw new InvalidDraft("Revisa los filtros de analítica."); }
+      const call = onlineCapability(request, target());
+      const result = parseAdvancedMetric(await call(`${reportsPath}/advanced?${query}`, { successStatus: 200, onlineOnly: true }, unavailable), metric);
+      if (currency && result.currency !== currency) throw new TypeError("Unexpected analytics currency");
+      return result;
     },
   };
 }

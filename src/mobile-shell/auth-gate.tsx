@@ -45,7 +45,7 @@ function RecoveryForm({ identity, busy, submit }: { identity: Identity; busy: bo
 
 const unauthorized = (error: unknown) => error instanceof TransportError && error.kind === "http" && error.status === 401;
 type Route = "loading" | "sign-in" | "onboarding" | "workspace" | "retry";
-export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace, profile: string) => ReactNode); signOut?: (operation: () => Promise<void>) => Promise<void> }) {
+export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: { auth: () => Auth; identity: Identity; home: ReactNode | ((workspace: Workspace, profile: string, signOutAll: () => Promise<void>) => ReactNode); signOut?: (operation: () => Promise<void>) => Promise<void> }) {
   const colors = paletteFor(useColorScheme());
   const [route, setRoute] = useState<Route>("loading");
   const [context, setContext] = useState<WorkspaceContext | null>(null);
@@ -70,11 +70,12 @@ export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: {
   }, [identity]);
   useEffect(() => { void check(); return () => { ++sequence.current; }; }, [check]);
 
-  async function run(operation: () => Promise<void>, error: string) {
+  async function run(operation: () => Promise<void>, error: string, propagate = false) {
     if (submitting.current) return;
     submitting.current = true;
     setBusy(true); setNotice("");
     try { await operation(); } catch (failure) {
+      if (propagate) throw failure;
       if (unauthorized(failure)) { setContext(null); setRoute("sign-in"); }
       else setNotice(failure instanceof InvalidDraft || (failure instanceof Error && failure.message === workspaceUnavailable) ? failure.message : error);
     } finally { submitting.current = false; setBusy(false); }
@@ -99,14 +100,20 @@ export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: {
       await check();
     }, "No pudimos continuar. Verifica tus datos e inténtalo de nuevo.");
   }
-  const signOut = () => void run(async () => {
-    const close = async () => { await auth().signOut(); setContext(null); setRoute("sign-in"); };
+  const closeSessions = async (global = false) => {
+    const close = async () => {
+      const client = auth();
+      if (global) await client.signOut("global");
+      await client.signOut(); setContext(null); setRoute("sign-in");
+    };
     await (purgeAfterSignOut ? purgeAfterSignOut(close) : close());
-  }, "No pudimos cerrar la sesión.");
+  };
+  const signOut = () => void run(() => closeSessions(), "No pudimos cerrar la sesión.");
+  const signOutAll = () => run(() => closeSessions(true), "No pudimos cerrar todas las sesiones.", true);
   const noticeText = notice ? <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: colors.text }}>{notice}</Text> : null;
   if (route === "workspace" && context?.active && !choosing) return <View style={{ flex: 1, backgroundColor: colors.canvas }}>
     <SafeAreaView edges={["top"]}><Text style={{ color: colors.text }}>Espacio activo: {context.active.name}</Text><AuthAction label="Cambiar de espacio" action={() => { setChoosing(true); setNotice(""); }} disabled={busy} /></SafeAreaView>
-    {typeof home === "function" ? home(context.active, context.profileId) : home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
+    {typeof home === "function" ? home(context.active, context.profileId, signOutAll) : home}<SafeAreaView edges={["bottom"]}>{noticeText}<AuthAction label="Cerrar sesión" action={signOut} disabled={busy} /></SafeAreaView>
   </View>;
   const title = route === "sign-in" ? (signup ? "Crear cuenta" : "Iniciar sesión") : route === "onboarding" ? "Completa tu perfil" : route === "workspace" ? (context?.items.length ? "Elige un espacio" : "No tienes espacios disponibles") : route === "retry" ? "No pudimos verificar tu perfil" : "Verificando tu perfil…";
   const field = { minHeight: 44, padding: 12, backgroundColor: colors.raised, color: colors.text };

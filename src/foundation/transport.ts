@@ -74,6 +74,10 @@ function safePath(path: string) {
 }
 // These contract routes do not take a workspace header, but still verify the active workspace before dispatch.
 const subjectRoute = /^\/v1\/(?:notifications(?:\?|$)|notifications\/[a-f\d-]{36}\/read$|me\/(?:notification-preferences|push-devices)$)/;
+function subjectSessionRoute(path: string, method = "GET") {
+  return method === "GET" ? /^\/v1\/me\/sessions(?:\?.*)?$/.test(path)
+    : method === "POST" && path === "/v1/me/sessions/revoke-others";
+}
 function subjectAccessRoute(path: string, method = "GET") {
   if (method === "GET") return /^\/v1\/mcp\/grants(?:\?.*)?$/.test(path);
   if (method === "POST") return path === "/v1/mcp/grants" || path === "/v1/cli/device/approve";
@@ -152,7 +156,7 @@ export function createTransport({
       safePath(path);
       const id = uuid(expected);
       if (options?.subjectResource && !subjectRoute.test(path) && !subjectAccessRoute(path, options.method) &&
-        !workspaceRosterRoute(path, id, options.method)) throw new TypeError("Invalid Savia subject resource");
+        !subjectSessionRoute(path, options.method) && !workspaceRosterRoute(path, id, options.method)) throw new TypeError("Invalid Savia subject resource");
       if (!id) throw new Error(workspaceUnavailable);
       return withBearer(async (token) => {
         const request = bind(token);

@@ -54,6 +54,12 @@ test("uses public configuration, S256-capable PKCE, and only device-bound storag
   await expect(auth.readSession()).resolves.toEqual({ accessToken: session.access_token });
 });
 
+test("can ask the installed provider to close all sessions globally", async () => {
+  const auth = createAuth(origin, "sb_publishable_fixture");
+  await expect(auth.signOut("global")).resolves.toBeUndefined();
+  expect(provider.signOut.mock.calls).toEqual([[{ scope: "global" }]]);
+});
+
 test.each(["sb_secret_fixture", "eyJhbGciOiJub25lIn0.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.fixture"])("rejects non-public build configuration before SDK creation", (key) => {
   expect(() => createAuth(origin, key)).toThrow("Invalid Supabase public key");
   expect(client).not.toHaveBeenCalled();

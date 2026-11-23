@@ -1,6 +1,7 @@
 import { isDay, type ScopedRequest } from "./accounts";
 import { isCursor } from "./cursor";
 import { fundRecord } from "./funds";
+import { parseFxRatesUsed, type FxRateUsed } from "./fx-rates";
 import { InvalidDraft } from "./identity-draft";
 import { onlineCapability } from "./online-capability";
 import type { PendingSubmissionExpired } from "./pending-expiry";
@@ -24,7 +25,7 @@ const backupUnavailable = "Copia completa no disponible en este servidor.";
 export const backupForbidden = "Solo el propietario puede crear y descargar copias completas.";
 const noLink = "No hay un enlace de descarga vigente.";
 export type JobKind = keyof typeof paths;
-export type DataJob = Readonly<{ id: string; kind: JobKind; status: keyof typeof jobStatuses; format?: string }>;
+export type DataJob = Readonly<{ id: string; kind: JobKind; status: keyof typeof jobStatuses; format?: string; fxRatesUsed?: readonly FxRateUsed[] }>;
 export const inProgress = (job: DataJob) => job.status === "queued" || job.status === "processing";
 export type ReportSelection = { definitionId: string; preset?: never } | { preset: string; definitionId?: never };
 export type JobDraft = ({ kind: "report"; format: string } & ReportSelection) |
@@ -34,10 +35,11 @@ function member<T extends object>(set: T, value: unknown): value is keyof T {
   return typeof value === "string" && Object.hasOwn(set, value);
 }
 function parseJob(input: unknown, kind: JobKind, format?: string): DataJob {
-  const { id: raw, status, format: actual, createdAt } = fundRecord(input), id = uuid(raw);
+  const { id: raw, status, format: actual, createdAt, fxRatesUsed } = fundRecord(input), id = uuid(raw);
   if (!id || !member(jobStatuses, status) || typeof createdAt !== "string" || !Number.isFinite(Date.parse(createdAt)) ||
     (kind !== "backup" && actual !== format)) throw new TypeError("Invalid data job");
-  return Object.freeze({ id, status, kind, format });
+  const rates = kind === "report" ? parseFxRatesUsed(fxRatesUsed) : undefined;
+  return Object.freeze({ id, status, kind, format, ...(rates && { fxRatesUsed: rates }) });
 }
 
 function parseDefinition(input: unknown) {

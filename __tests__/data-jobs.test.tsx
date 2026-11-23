@@ -53,6 +53,20 @@ function setup({ role = "owner", unavailable = 0, lose = false, complete = true 
 }
 const open = async () => { await render(<Index />); await press("Informes y exportaciones"); };
 
+test("shows the applied rates from a completed report run without opening its download", async () => {
+  const f = setup(), normal = f.client.getMockImplementation()!;
+  f.client.mockImplementation(async (url: string, init: RequestInit) => {
+    const response = await normal(url, init);
+    if (new URL(url).pathname !== `/v1/report-runs/${job}`) return response;
+    return { ...response, json: async () => ({ ...await response.json(), fxRatesUsed: [
+      { baseCurrency: "USD", quoteCurrency: "COP", rate: "4150.125", rateDate: "2026-11-20", source: "manual", freshness: "fresh" },
+    ] }) };
+  });
+  await open(); await press("Informe: Mi resumen"); await press("Generar informe"); await press("Actualizar estado");
+  await screen.findByText("USD → COP · 4150.125 · 2026-11-20 · manual · Vigente");
+  expect(f.reads).toEqual([`/v1/report-runs/${job}`]); expect(openURL).not.toHaveBeenCalled();
+});
+
 test("runs a saved report, polls it, and only opens a fresh signed link on tap", async () => {
   const f = setup({ complete: false }); jest.useFakeTimers();
   try {

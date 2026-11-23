@@ -3,8 +3,10 @@ import { ACTIVE_CURRENCIES } from "./currencies";
 import { isCursor } from "./cursor";
 import { InvalidDraft } from "./identity-draft";
 import { creationReceipt } from "./ledger-create";
+import { onlineCapability } from "./online-capability";
 import type { PendingSubmissionExpired } from "./pending-expiry";
 import { pendingSubmission } from "./pending-submission";
+import { bulkVersion } from "./transaction-bulk";
 import { uuid } from "./workspace-context";
 
 export const statuses = { draft: "Borrador", pending: "Pendiente", confirmed: "Confirmada", reconciled: "Conciliada", voided: "Anulada" } as const;
@@ -36,7 +38,7 @@ const optionalText = (value: unknown) => {
 };
 
 const metadata = ["date", "categoryId", "payeeId", "description", "tagIds"] as const;
-export type LedgerDraft = Partial<Record<"date" | "description" | "categoryId" | "payeeId" | "type" | "amount" | "accountId" | "status", string | null> & { tagIds: string[] }>;
+export type LedgerDraft = Partial<Record<"date" | "description" | "categoryId" | "payeeId" | "type" | "amount" | "accountId" | "status", string | null> & { tagIds: string[]; extraordinary: boolean }>;
 const invalidMovement = () => new InvalidDraft("Revisa los datos del movimiento.");
 const cleanText = (raw: unknown, max: number) => {
   if (typeof raw !== "string" || raw.includes("\0") || [...raw.trim()].length > max) throw new TypeError();
@@ -45,7 +47,7 @@ const cleanText = (raw: unknown, max: number) => {
 function writeBody(input: unknown, currencies?: ReadonlyMap<string, string>) {
   try {
     const draft = object(input), keys = Object.keys(draft);
-    const allowed = currencies ? [...metadata, "type", "accountId", "amount", "status"] : metadata;
+    const allowed = currencies ? [...metadata, "type", "accountId", "amount", "status"] : [...metadata, "extraordinary"];
     if (!keys.length || keys.some((key) => !(allowed as readonly string[]).includes(key))) throw new TypeError();
     const body: Record<string, unknown> = currencies ? { categoryId: null, payeeId: null, description: null, tagIds: [] } : {};
     if (currencies) {
@@ -56,6 +58,10 @@ function writeBody(input: unknown, currencies?: ReadonlyMap<string, string>) {
         if (draft.status !== "draft" && draft.status !== "pending" && draft.status !== "confirmed") throw new TypeError();
         body.status = draft.status;
       }
+    }
+    if (!currencies && Object.hasOwn(draft, "extraordinary")) {
+      if (typeof draft.extraordinary !== "boolean") throw new TypeError();
+      body.extraordinary = draft.extraordinary;
     }
     for (const key of metadata) {
       if (!Object.hasOwn(draft, key)) continue;
@@ -118,15 +124,19 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
   const get = (path: string) => request(workspaceId, path, { successStatus: 200 });
   let accountCurrencies = new Map<string, string>();
   async function write(method: "POST" | "PATCH", path: string, body: object, confirmation?: PendingSubmissionExpired, expected?: string, ifMatch?: string, form?: object) {
-    const result = await request(workspaceId, path, { method, body, ifMatch, form, successStatus: expected ? 200 : 201,
+    const classification = method === "PATCH" && Object.hasOwn(body, "extraordinary");
+    const options: NonNullable<Parameters<ScopedRequest>[2]> = { method, body, ifMatch, form, successStatus: expected ? 200 : 201,
       submit: (profile, operation, serverDate) => pendingSubmission(requiredId(workspaceId), profile, JSON.stringify([method, path, body]), async (key) => {
         const saved = object(await operation(key));
         if (!expected) return creationReceipt(path, body, saved);
         const id = requiredId(saved.id);
-        if ((expected && id !== expected) || (path.endsWith("/void") && saved.status !== "voided")) throw new TypeError();
+        if (id !== expected || (path.endsWith("/void") && saved.status !== "voided") ||
+          (classification && (saved.extraordinary ?? false) !== (body as Record<string, unknown>).extraordinary)) throw new TypeError();
         return id;
       }, { ifMatch, confirmation, serverDate }),
-    });
+    };
+    const result = classification ? await onlineCapability(request, workspaceId)(path, options, "Esta función no está disponible en este servidor.")
+      : await request(workspaceId, path, options);
     return requiredId(result);
   }
   async function catalog(kind: Catalog, currencies?: Map<string, string>) {
@@ -178,9 +188,10 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
       catch { throw new InvalidDraft("Escribe un motivo de 3 a 500 caracteres."); }
       return write("POST", `${endpoint}/${id}/void`, { reason }, confirmation, id, etag);
     },
-    async list(input: unknown = {}) {
-      const params = queryFor(input);
-      return parsePage(await get(`${endpoint}?${params}`), transaction, params.get("cursor"));
+    async list(input: unknown = {}, onlineOnly?: true) {
+      const params = queryFor(input), path = `${endpoint}?${params}`;
+      const payload = onlineOnly ? await request(workspaceId, path, { successStatus: 200, onlineOnly }) : await get(path);
+      return parsePage(payload, (row) => ({ ...transaction(row), version: bulkVersion(object(row).version) }), params.get("cursor"));
     },
     async detail(raw: unknown) {
       const id = uuid(raw);
@@ -197,16 +208,17 @@ export function createTransactions(request: ScopedRequest, workspaceId: string) 
         return { amount: money(amount), category: requiredId(categoryId), notes: optionalText(notes), tags: tagsOf(tagIds) };
       });
       const equivalent = body.baseCurrencyAmount === undefined ? null : money(object(body.baseCurrencyAmount).converted);
-      const notes = optionalText(body.notes);
+      const notes = optionalText(body.notes), extraordinary = body.extraordinary ?? false;
+      if (typeof extraordinary !== "boolean") throw new TypeError();
       const [accounts, categories, payees, tags] = await Promise.all([
         catalog("accounts"), category || splits.length ? catalog("categories") : null,
         payee ? catalog("payees") : null, tagIds.length || splits.some((split) => split.tags.length) ? catalog("tags") : null,
       ]);
       const label = (names: Map<string, string> | null, id: string) => names?.get(id) ?? "No disponible";
       const editable = isETag(response.etag) && body.status !== "voided" && body.status !== "reconciled" ? {
-        etag: response.etag, canVoid: body.status !== "draft", fields: { date: row.occurredAt.slice(0, 10), categoryId: category, payeeId: payee, description: optionalText(body.description), tagIds },
+        etag: response.etag, canVoid: body.status !== "draft", fields: { date: row.occurredAt.slice(0, 10), categoryId: category, payeeId: payee, description: optionalText(body.description), tagIds, extraordinary },
       } : null;
-      return { ...row, editable, notes, equivalent, account: label(accounts, account), category: category && label(categories, category),
+      return { ...row, editable, notes, equivalent, extraordinary, account: label(accounts, account), category: category && label(categories, category),
         payee: payee && label(payees, payee), tags: tagIds.map((id) => label(tags, id)),
         splits: splits.map((split) => ({ ...split, category: label(categories, split.category), tags: split.tags.map((id) => label(tags, id)) })) };
     },

@@ -103,6 +103,27 @@ test("validates drafts and void bounds before session access and never writes wi
   expect(send.mock.calls.map(([url, init]) => [new URL(url).pathname, new Headers(init.headers).get("X-Workspace-Id")])).toEqual([["/v1/me", null], ["/v1/workspaces", null]]);
 });
 
+test("sets and clears the extraordinary flag with the reviewed transaction version", async () => {
+  const { connect, writes, pending } = setup();
+  await render(<TransactionsScreen api={connect()} back={jest.fn()} />); await press("Café"); await press("Editar movimiento");
+  expect(screen.getByRole("button", { name: "Extraordinario" })).not.toBeSelected();
+  await press("Extraordinario"); await press("Guardar cambios"); await screen.findByText("Movimiento extraordinario");
+  await press("Editar movimiento"); expect(screen.getByRole("button", { name: "Extraordinario" })).toBeSelected();
+  await press("Extraordinario"); await press("Guardar cambios"); await screen.findByRole("button", { name: "Editar movimiento" });
+  expect(screen.queryByText("Movimiento extraordinario")).toBeNull();
+  expect(writes).toEqual([true, false].map((extraordinary, i) => ({ method: "PATCH", url: `${path}/${movement}`, key: expect.any(String),
+    body: { extraordinary }, match: `"${i + 1}"`, pending: true })));
+  expect(writes[1].key).not.toBe(writes[0].key); expect(pending()).toEqual([]);
+});
+
+test("rejects nonboolean extraordinary edits and never accepts the flag on transaction creation", async () => {
+  const { connect, read, send, writes, pending } = setup();
+  const api = connect(); await api.formOptions(true); read.mockClear(); send.mockClear();
+  await expect(api.update(movement, '"1"', { extraordinary: "false" })).rejects.toThrow("Revisa los datos del movimiento.");
+  await expect(api.create({ ...draft, extraordinary: true })).rejects.toThrow("Revisa los datos del movimiento.");
+  expect(read).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(writes).toEqual([]); expect(pending()).toEqual([]);
+});
+
 test("does not submit when Secure Store cannot persist the retry key", async () => {
   const { connect, writes, created } = setup();
   const api = connect(); await api.formOptions(true);

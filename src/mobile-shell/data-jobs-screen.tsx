@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { backupForbidden, exportFormats, inProgress, jobStatuses, reportFormats, reportPresets, resources, type DataJob, type DataJobs, type JobDraft, type JobKind, type ReportSelection } from "../foundation/data-jobs";
 import { AuthAction, AuthPanel } from "./auth-gate";
-import { ReportText } from "./period-report";
+import { FxFreshness, ReportText } from "./period-report";
 import { PlanningField } from "./planning-field";
 import { usePendingWrite } from "./use-pending-write";
 
@@ -77,6 +77,7 @@ function JobPanel({ api, kind }: { api: DataJobs; kind: JobKind }) {
     {confirm && <AuthAction label="Confirmar reintento" disabled={busy} action={confirm} />}
     {job ? <>
       <ReportText>{jobStatuses[job.status]}</ReportText>
+      <FxFreshness rates={job.fxRatesUsed} fallback={false} />
       {inProgress(job) && <AuthAction label="Actualizar estado" disabled={busy} action={() => refresh(job)} />}
       {job.status === "completed" && <AuthAction label="Descargar archivo" disabled={busy} action={() => download(job)} />}
       {!inProgress(job) && <AuthAction label="Preparar otro trabajo" disabled={busy} action={newJob} />}

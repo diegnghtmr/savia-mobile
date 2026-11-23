@@ -9,7 +9,7 @@ import { uuid } from "./workspace-context";
 export interface Auth {
   signIn(email: string, password: string): Promise<void>;
   signUp(email: string, password: string): Promise<boolean>;
-  signOut(): Promise<void>;
+  signOut(scope?: "local" | "global"): Promise<void>;
   refreshSession(): Promise<boolean>;
   exchangeCode(code: string): Promise<void>;
   readSession(): Promise<{ accessToken: string } | null>;
@@ -57,8 +57,8 @@ export function createAuth(url = process.env.EXPO_PUBLIC_SUPABASE_URL, key = pro
       if (error) throw new Error("Sign-up failed");
       return Boolean(data.session);
     },
-    async signOut() {
-      const { error } = await auth.signOut({ scope: "local" });
+    async signOut(scope = "local") {
+      const { error } = await auth.signOut({ scope });
       if (error) throw new Error("Sign-out failed");
     },
     async refreshSession() {
