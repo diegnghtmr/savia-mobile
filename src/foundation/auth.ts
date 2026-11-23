@@ -58,8 +58,14 @@ export function createAuth(url = process.env.EXPO_PUBLIC_SUPABASE_URL, key = pro
       return Boolean(data.session);
     },
     async signOut(scope = "local") {
-      const { error } = await auth.signOut({ scope });
-      if (error) throw new Error("Sign-out failed");
+      try {
+        const { error } = await auth.signOut({ scope });
+        if (error) throw new Error("Sign-out failed");
+      } catch (error) {
+        // An expired session can fail to refresh before the SDK reaches its local cleanup.
+        if (scope === "global") await Promise.all(["", "-code-verifier", "-user"].map((suffix) => secureStorage.removeItem(storageKey + suffix)));
+        throw error;
+      }
     },
     async refreshSession() {
       const { data, error } = await auth.refreshSession();

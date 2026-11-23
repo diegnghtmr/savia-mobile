@@ -123,3 +123,33 @@ test("a refused conversion keeps the versioned preview and does not change store
     action: { type: "convertImported", targetType: "income" } }, key: expect.any(String) }]);
   expect(f.effects.size).toBe(0); expect(await hash()).toBe(before); expect(Storage.setItemAsync).not.toHaveBeenCalled();
 });
+
+// Reviewer regression (verify mwtw32mo, 9c3cee8). __tests__/transaction-bulk.test.tsx (append).
+test.each([false, true])("bulk stays unavailable with a cached page (first page cached: %s) until a fresh reload", async (cachedFirst) => {
+  const f = setup(), normal = jest.mocked(send).getMockImplementation()!;
+  const cursor = Buffer.from(JSON.stringify(["2026-11-25T00:00:00.000000Z", one])).toString("base64url");
+  let cachedPageOnly = false;
+  jest.mocked(send).mockImplementation(async (...args) => {
+    const url = new URL(String(args[0])), continuation = url.searchParams.has("cursor");
+    if (url.pathname === "/v1/transactions" && cachedPageOnly && continuation !== cachedFirst) throw new Error("page offline");
+    const reply = await normal(...args);
+    if (url.pathname !== "/v1/transactions") return reply;
+    const { items } = await reply.json() as { items: unknown[] };
+    return Object.assign(reply, { json: async () => ({ items: [items[continuation ? 1 : 0]],
+      pageInfo: { hasNextPage: !continuation, nextCursor: continuation ? null : cursor } }) });
+  });
+  const first = await render(<Index />); await press("Movimientos"); await press("Cargar más");
+  await screen.findByRole("button", { name: "Pan" }); await first.unmount();
+  cachedPageOnly = true;
+  await render(<Index />); await press("Movimientos"); await screen.findByRole("button", { name: "Café" });
+  if (cachedFirst) expect(screen.queryByRole("button", { name: "Acciones en lote" })).toBeNull();
+  await press("Cargar más"); await screen.findByRole("button", { name: "Pan" });
+  expect(screen.getByRole("button", { name: "Café" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Acciones en lote" })).toBeNull();
+  cachedPageOnly = false;
+  await press("Filtros"); await press("Aplicar filtros"); await press("Cargar más");
+  await screen.findByRole("button", { name: "Pan" }); await press("Acciones en lote");
+  expect(screen.getByRole("button", { name: "Seleccionar: Café" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Seleccionar: Pan" })).toBeEnabled();
+  expect(f.requests).toEqual([]);
+});

@@ -109,11 +109,7 @@ export function AuthGate({ auth, identity, home, signOut: purgeAfterSignOut }: {
         try { await client.signOut("global"); }
         catch (error) { providerFailure = { error }; }
       }
-      try { await client.signOut(); }
-      catch (error) {
-        // The SDK can report a provider error after removing this device's session.
-        if (!global || await client.readSession()) throw error;
-      }
+      await client.signOut();
       ++sequence.current;
       setContext(null); setRoute("sign-in");
     };

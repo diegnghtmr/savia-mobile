@@ -251,3 +251,47 @@ test("review: leaving account detail prevents its late cache fallback from chang
     expect(screen.queryByRole("alert", { name: /Sin conexión — datos guardados el/ })).toBeNull();
   } finally { unpause(); await f.close(); }
 });
+
+// Reviewer regression (verify mwtw32mo, 9c3cee8). __tests__/offline-lifecycle.test.tsx (append).
+test.each([false, true])("close-all purges tokens, cache and outbox after provider failure (expired session: %s)", async (expired) => {
+  const f = await setup();
+  try {
+    await warmMovements(); f.online(false); await record(); f.online(true);
+    await press("Volver al resumen");
+    const read = () => offlineStore()(async (db) => Object.fromEntries(await Promise.all(["cache", "outbox", "membership"].map(async (table) =>
+      [table, (await db.getAllAsync(`SELECT * FROM ${table} WHERE principal = ?`, profile)).length]))));
+    const before = await read();
+    expect(before.cache).toBeGreaterThan(0); expect(before.outbox).toBe(1); expect(before.membership).toBe(1);
+    const network = jest.mocked(expoFetch), normal = network.getMockImplementation()!, paths: string[] = [];
+    network.mockImplementation(async (url, init) => {
+      const parsed = new URL(String(url)); paths.push(parsed.pathname + parsed.search);
+      if (parsed.pathname === `/v1/workspaces/${workspace}`) {
+        const reply = await normal(url, init);
+        return { ...reply, json: async () => ({ id: workspace }) };
+      }
+      if (!parsed.pathname.startsWith("/auth/v1/")) return normal(url, init);
+      return new Response('{"code":"unexpected_failure","message":"unavailable"}',
+        { status: 503, headers: { "Content-Type": "application/json" } });
+    });
+    const origin = "https://project.invalid", { createAuth } = jest.requireActual<typeof import("../src/foundation/auth")>("../src/foundation/auth");
+    const authKey = "savia.auth." + Array.from(origin, (char) => char.charCodeAt(0).toString(16)).join("");
+    storage.set(authKey, JSON.stringify({ access_token: "fixture-access", refresh_token: "fixture-refresh", user: { id: profile },
+      expires_at: Math.floor(Date.now() / 1000) + 3600 }));
+    const client = createAuth(origin, "sb_publishable_fixture");
+    jest.mocked(getAuth).mockReturnValue(client);
+    await press("Sesiones"); await screen.findByText("No hay sesiones activas.");
+    await press("Cerrar todas las sesiones"); paths.length = 0;
+    jest.useFakeTimers({ doNotFake: ["performance"] });
+    if (expired) {
+      const stored = JSON.parse(storage.get(authKey)!);
+      storage.set(authKey, JSON.stringify({ ...stored, expires_at: Math.floor(Date.now() / 1000) - 1 }));
+    }
+    await press("Confirmar cierre");
+    await act(async () => { await jest.advanceTimersByTimeAsync(32_000); });
+    expect({ tokenPresent: storage.has(authKey), signedOut: !!screen.queryByText("Iniciar sesión"), ...await read() })
+      .toEqual({ tokenPresent: false, signedOut: true, cache: 0, outbox: 0, membership: 0 });
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.every((path) => path === (expired ? "/auth/v1/token?grant_type=refresh_token" : "/auth/v1/logout?scope=global"))).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent("No pudimos cerrar todas las sesiones.");
+  } finally { jest.useRealTimers(); await f.close(); }
+});

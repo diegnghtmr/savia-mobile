@@ -120,3 +120,28 @@ test.each([["this_quarter", "2026-10-01"], ["this_year", "2026-01-01"]])("honors
     expect(f.queries[0]).toBe(`from=${from}&to=2026-11-25&presentationCurrency=USD`);
   } finally { jest.useRealTimers(); }
 });
+
+// Reviewer regression (verify mwtw32mo, 9c3cee8). __tests__/dashboard-preferences.test.tsx (append).
+test.each([
+  ["this_quarter", "2026-04-01T00:00:00Z", "2026-04-01"],
+  ["this_quarter", "2026-12-31T23:59:59Z", "2026-10-01"],
+  ["this_year", "2026-12-31T23:59:59Z", "2026-01-01"],
+  ["this_quarter", "2027-01-01T00:00:00Z", "2027-01-01"],
+  ["this_year", "2027-01-01T00:00:00Z", "2027-01-01"],
+  ["this_month", "2026-12-31T23:59:59Z", "2026-12-01"],
+  ["this_month", "2027-01-01T00:00:00Z", "2027-01-01"],
+])("uses the saved UTC %s range at %s", async (preset, now, from) => {
+  jest.useFakeTimers({ now: new Date(now), doNotFake: ["performance"] });
+  try {
+    const f = setup(), normal = jest.mocked(send).getMockImplementation()!;
+    jest.mocked(send).mockImplementation(async (...args) => {
+      const response = await normal(...args);
+      if (new URL(String(args[0])).pathname !== path) return response;
+      const body = await response.json() as object;
+      return Object.assign(response, { json: async () => ({ ...body, period: { preset } }) });
+    });
+    await dashboard(); await screen.findByText("Patrimonio neto: 1,00 USD");
+    expect(f.queries).toEqual([`from=${from}&to=${now.slice(0, 10)}&presentationCurrency=USD`]);
+    expect(screen.getByText(/No pudimos verificar la zona horaria.*UTC/)).toBeTruthy();
+  } finally { jest.useRealTimers(); }
+});
