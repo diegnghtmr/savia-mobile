@@ -3,6 +3,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useMemo, useRef, useState } from "react";
 import { createAccounts, type ScopedRequest } from "../foundation/accounts";
 import { createAnalytics } from "../foundation/analytics";
+import { createAssistant } from "../foundation/assistant";
 import { getAuth } from "../foundation/auth";
 import { createBudgetWrites } from "../foundation/budget-writes";
 import { createBudgets } from "../foundation/budgets";
@@ -25,6 +26,7 @@ import { createTransfers } from "../foundation/transfers";
 import { createTransport } from "../foundation/transport";
 import { AccountsScreen } from "../mobile-shell/accounts-screen";
 import { AnalyticsScreen } from "../mobile-shell/analytics-screen";
+import { AssistantScreen } from "../mobile-shell/assistant-screen";
 import { AuthAction, AuthGate } from "../mobile-shell/auth-gate";
 import { BudgetsScreen } from "../mobile-shell/budgets-screen";
 import { DashboardScreen } from "../mobile-shell/dashboard-screen";
@@ -55,7 +57,7 @@ export function SaviaMobile(sources: Sources) {
     home={({ id }, profile) => <WorkspaceHome key={`${profile}:${id}`} id={id} profile={profile} {...sources} />} />;
 }
 
-type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings";
+type Route = "home" | "accounts" | "transactions" | "new-transaction" | "transfers" | "budgets" | "funds" | "debts" | "dashboard" | "analytics" | "forecasts" | "scenarios" | "imports" | "receipts" | "notifications" | "notification-settings" | "assistant";
 const workspaceRequest: ScopedRequest = (...args) => transport().requestInWorkspace(...args);
 function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSource }: { id: string; profile: string } & Sources) {
   const latest = useRef(0);
@@ -99,7 +101,7 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
       transfers: createTransfers(queued(scoped), id, transactions.transferAccounts), budgets: budgets(scoped), budgetViews: views(budgets), budgetWrites: createBudgetWrites(scoped, id),
       funds: funds(scoped), fundViews: views(funds), debts: debts(scoped), debtViews: views(debts), analytics: createAnalytics(scoped, id, reportBatch), forecasts: createForecasts(scoped, id), scenarios: createScenarios(scoped, id),
       receipts, receiptConfirmations: createReceiptConfirmations(scoped, id, receipts.detail, transactions.transferAccounts),
-      inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id),
+      inbox: createInbox(scoped, id), notificationPreferences: createNotificationPreferences(scoped, id), assistant: createAssistant(scoped, id),
       imports: createImports(scoped, id), importCommits: createImportCommits(scoped, id, transactions.transferAccounts) };
   }, [accountWrites, box, profile, id, generation]);
   const back = () => show("home");
@@ -117,11 +119,12 @@ function WorkspaceHome({ id, profile, statementSource, imageSource, pushTokenSou
     : route === "receipts" ? <ReceiptsScreen api={apis.receipts} confirmations={apis.receiptConfirmations} source={imageSource} back={back} />
     : route === "notifications" ? <NotificationInbox api={apis.inbox} back={back} preferences={() => show("notification-settings")} />
     : route === "notification-settings" ? <NotificationSettings api={apis.notificationPreferences} tokenSource={pushTokenSource} back={() => show("notifications")} />
-    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} />}</>;
+    : route === "assistant" ? <AssistantScreen api={apis.assistant} back={back} />
+    : <HomeScreen openAccounts={() => show("accounts")} openTransactions={() => show("transactions")} registerMovement={() => show("new-transaction")} openTransfers={() => show("transfers")} openBudgets={() => show("budgets")} openFunds={() => show("funds")} openDebts={() => show("debts")} openDashboard={() => show("dashboard")} openAnalytics={() => show("analytics")} openForecasts={() => show("forecasts")} openScenarios={() => show("scenarios")} openImports={() => show("imports")} openReceipts={() => show("receipts")} openNotifications={() => show("notifications")} openAssistant={() => show("assistant")} />}</>;
 }
 
-type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void };
-export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications }: HomeActions = {}) {
+type HomeActions = { openAccounts?: () => void; openTransactions?: () => void; registerMovement?: () => void; openTransfers?: () => void; openBudgets?: () => void; openFunds?: () => void; openDebts?: () => void; openDashboard?: () => void; openAnalytics?: () => void; openForecasts?: () => void; openScenarios?: () => void; openImports?: () => void; openReceipts?: () => void; openNotifications?: () => void; openAssistant?: () => void };
+export function HomeScreen({ openAccounts, openTransactions, registerMovement, openTransfers, openBudgets, openFunds, openDebts, openDashboard, openAnalytics, openForecasts, openScenarios, openImports, openReceipts, openNotifications, openAssistant }: HomeActions = {}) {
   const colors = paletteFor(useColorScheme());
   const { fontScale, width } = useWindowDimensions();
   return (
@@ -151,6 +154,7 @@ export function HomeScreen({ openAccounts, openTransactions, registerMovement, o
         {openImports && <AuthAction label="Importar extractos" action={openImports} />}
         {openReceipts && <AuthAction label="Recibos" action={openReceipts} />}
         {openNotifications && <AuthAction label="Notificaciones" action={openNotifications} />}
+        {openAssistant && <AuthAction label="Asistente" action={openAssistant} />}
       </ScrollView>
     </SafeAreaView>
   );

@@ -1,4 +1,5 @@
 import { fetch as expoFetch } from "expo/fetch";
+import { readAgentEvents } from "./agent-events";
 import { readApiOrigin } from "./config";
 import { workspaceUnavailable } from "./identity-draft";
 import { sessionStore, type SessionCredentials } from "./session-store";
@@ -26,8 +27,8 @@ export async function readLocalBlob(uri: string): Promise<Blob> {
     local.send();
   });
 }
-type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json">>;
-type RequestInput = { method?: string; body?: unknown; multipart?: FormData; idempotencyKey?: string; successStatus?: number | readonly number[] };
+type Send = (url: string, init: RequestInit) => Promise<Pick<Response, "status" | "ok" | "headers" | "redirected" | "json"> & Partial<Pick<Response, "body">>>;
+type RequestInput = { method?: string; body?: unknown; multipart?: FormData; idempotencyKey?: string; successStatus?: number | readonly number[]; agentEvents?: true };
 type WorkspaceOptions = {
   ifMatch?: string;
   includeETag?: boolean;
@@ -86,9 +87,10 @@ export function createTransport({
     if (!session) throw new TransportError("http", 401);
     return operation(session.accessToken);
   }
-  async function execute(token: string, path: string, { method = "GET", body, multipart, idempotencyKey, successStatus }: RequestInput = {}, workspace?: WorkspaceOptions & { id?: string }, onDate?: (date: number | null) => void) {
+  async function execute(token: string, path: string, { method = "GET", body, multipart, idempotencyKey, successStatus, agentEvents }: RequestInput = {}, workspace?: WorkspaceOptions & { id?: string }, onDate?: (date: number | null) => void) {
     safePath(path);
-    const headers: Record<string, string> = { Accept: "application/json, application/problem+json" };
+    if (agentEvents && (!workspace?.id || method !== "POST" || !/^\/v1\/agent\/conversations\/[a-f\d-]{36}\/messages$/.test(path))) throw new TypeError("Invalid agent stream request");
+    const headers: Record<string, string> = { Accept: agentEvents ? "text/event-stream, application/problem+json" : "application/json, application/problem+json" };
     headers.Authorization = ["Bearer", token].join(" ");
     if (multipart !== undefined && (method !== "POST" || body !== undefined || !(multipart instanceof FormData))) throw new TypeError("Invalid multipart request");
     const payload = multipart ?? (body === undefined ? undefined : JSON.stringify(body));
@@ -104,6 +106,7 @@ export function createTransport({
       if (response.ok) {
         const expected = typeof successStatus === "number" ? [successStatus] : successStatus;
         if (expected && !expected.includes(response.status)) throw new TransportError("protocol", response.status);
+        if (agentEvents) return readAgentEvents(response).catch(() => { throw new TransportError("protocol", response.status); });
         const decoded: unknown = response.status === 204 && expected?.includes(204) ? undefined
           : await response.json().catch(() => { throw new TransportError("protocol", response.status); });
         if (onDate) {
