@@ -16,8 +16,8 @@ export const reportPresets = {
   multi_currency: "Multimoneda", forecast: "Pronóstico", period_comparison: "Comparación de períodos",
 } as const;
 export const exportFormats = { csv: "CSV", json_backup: "Respaldo JSON", xlsx: "Excel (XLSX)" } as const;
-// The schema also declares budgets, debts, and report, but the export service rejects those resources.
-export const resources = { all: "Todos los datos", transactions: "Movimientos", accounts: "Cuentas" } as const;
+export const resources = { all: "Todos los datos", transactions: "Movimientos", accounts: "Cuentas",
+  budgets: "Presupuestos", debts: "Deudas" } as const;
 export const jobStatuses = { queued: "En cola", processing: "En proceso", completed: "Completado", failed: "Fallido" } as const;
 const paths = { report: "/v1/report-runs", export: "/v1/export-jobs", backup: "/v1/backup-jobs" } as const;
 const unavailable = "Esta función no está disponible en este servidor.";

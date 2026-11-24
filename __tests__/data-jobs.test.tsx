@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react-native";
+import { act, fireEvent, render, screen, within } from "@testing-library/react-native";
 import { fetch as send } from "expo/fetch";
 import { openURL } from "expo-linking";
 import * as Storage from "expo-secure-store";
@@ -147,18 +147,13 @@ test("a workspace with no saved definitions can still run the monthly preset", a
   expect(f.posts).toEqual([{ path: "/v1/report-runs", key: expect.any(String), body: { preset: "monthly_summary", format: "pdf" } }]);
 });
 
-test("the known unsupported generic report export is not presented as usable", async () => {
-  const f = setup(), normal = f.client.getMockImplementation()!;
-  f.client.mockImplementation(async (url: string, init: RequestInit) => {
-    const response = await normal(url, init);
-    if (new URL(url).pathname !== "/v1/export-jobs" || JSON.parse(String(init.body)).resource !== "report") return response;
-    return { ...response, ok: false, status: 422, json: async () => ({ title: "Export resource unavailable" }) };
-  });
-  await open(); await press("Exportar datos");
-  const option = screen.queryByRole("button", { name: /^Informes$/ });
-  if (!option || option.props.accessibilityState?.disabled) return;
-  await fireEvent.press(option); await press("Crear exportación");
-  expect(await screen.findByRole("alert")).toHaveTextContent("Esta función no está disponible en este servidor.");
+test("offers exactly the five supported export resource options", async () => {
+  const f = setup(); await open(); await press("Exportar datos");
+  const buttons = screen.getAllByRole("button").map((button) => within(button).getByText(/.+/).props.children);
+  expect(buttons.slice(buttons.indexOf("Excel (XLSX)") + 1, buttons.indexOf("Crear exportación")))
+    .toEqual(["Todos los datos", "Movimientos", "Cuentas", "Presupuestos", "Deudas"]);
+  expect(f.posts).toEqual([]);
+  expect(openURL).not.toHaveBeenCalled();
 });
 
 test.each(["create", "poll"])("demotion blocks backup %s before the job request", async (phase) => {
@@ -193,11 +188,27 @@ test("backup download uses only the new HTTPS link and leaves cache and outbox u
   expect(await hash()).toBe(before); expect(Storage.setItemAsync).not.toHaveBeenCalled();
 });
 
-test("only backend-supported export resources appear in the export form", async () => {
+test.each([
+  ["Todos los datos", "all", "CSV", "csv", {}],
+  ["Movimientos", "transactions", "Excel (XLSX)", "xlsx", { from: "2026-11-01" }],
+  ["Cuentas", "accounts", "Respaldo JSON", "json_backup", {}],
+  ["Presupuestos", "budgets", "CSV", "csv", { from: "2026-11-01", to: "2026-11-25" }],
+  ["Deudas", "debts", "Respaldo JSON", "json_backup", {}],
+] as const)("offers %s and submits the exact export job body", async (label, resource, formatLabel, format, dates) => {
   const f = setup(); await open(); await press("Exportar datos");
-  for (const name of ["Todos los datos", "Movimientos", "Cuentas"]) expect(screen.getByRole("button", { name })).toBeTruthy();
-  for (const name of ["Presupuestos", "Deudas", "Informes"]) expect(screen.queryByRole("button", { name })).toBeNull();
-  expect(f.posts).toEqual([]); expect(openURL).not.toHaveBeenCalled();
+  const option = screen.getByRole("button", { name: label });
+  if (resource !== "all") await fireEvent.press(option);
+  const formatOption = screen.getByRole("button", { name: formatLabel });
+  if (format !== "csv") await fireEvent.press(formatOption);
+  if ("from" in dates) await fireEvent.changeText(screen.getByLabelText("Desde (AAAA-MM-DD)"), dates.from);
+  if ("to" in dates) await fireEvent.changeText(screen.getByLabelText("Hasta (AAAA-MM-DD)"), dates.to);
+  expect(f.posts).toEqual([]);
+  await press("Crear exportación"); await screen.findByText("En cola");
+  const body = { format, resource, ...dates };
+  expect(f.posts).toEqual([{ path: "/v1/export-jobs", key: expect.any(String), body }]);
+  expect(f.client.mock.calls.filter(([url]) => new URL(url).pathname === "/v1/export-jobs").map(([, init]) => init.body))
+    .toEqual([JSON.stringify(body)]);
+  expect(openURL).not.toHaveBeenCalled();
 });
 
 test("offers every authority preset and switches from a saved definition without sending both selectors", async () => {
