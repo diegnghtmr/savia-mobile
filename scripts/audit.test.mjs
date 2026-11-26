@@ -25,7 +25,7 @@ test.afterEach(() => rm(workspace, { force: true, recursive: true }));
 
 test("accepts the exact clean boundary", async () => {
   const fixture = await copyFixture();
-  assert.equal((await audit(fixture)).paths, 17);
+  assert.equal((await audit(fixture)).paths, 19);
 });
 
 test("accepts the repository this module is itself kept in", async () => {
@@ -56,11 +56,21 @@ test("rejects each documentation-like executable class", async (t) => {
     "proof.md",
     "proof.mdx",
     "README.sh",
+    "README-copy.md",
   ])
     await t.test(path, async () => {
       const fixture = await copyFixture();
       await writeFile(join(fixture, path), "x\n");
       if (/\.(md|mdx|sh)$/.test(path)) await chmod(join(fixture, path), 0o755);
+      await assert.rejects(audit(fixture), /inventory/);
+    });
+});
+
+test("rejects copies of the allowed docs outside the repository root", async (t) => {
+  for (const path of ["LICENSE", "README.md"])
+    await t.test(path, async () => {
+      const fixture = await copyFixture();
+      await cp(join(fixture, path), join(fixture, "src", path));
       await assert.rejects(audit(fixture), /inventory/);
     });
 });
