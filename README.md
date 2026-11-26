@@ -1,12 +1,22 @@
 # Savia Mobile
 
-Savia Mobile is the Expo shell for Savia, a personal finance app in development. Its home screen shows an empty state and a disabled action for recording a movement. It does not sign users in, load financial records, or connect to the API.
+Savia Mobile is the Expo app for Savia, a personal finance system. Sign in with Supabase Auth to use the Savia API from Android or iOS.
+
+## Features
+
+- View accounts and balances, record transactions and transfers, and work with budgets, funds, and debts. Review detected subscription candidates and confirm or dismiss them.
+- Import CSV statements, create exports and download the results, and upload receipt images to review before confirming an expense.
+- Read the notification inbox and change notification preferences. The app only attempts push registration when you tap **Register this device** (`Registrar este dispositivo`) in Notification Settings. Push registration needs a non-development Android or iOS build with an Expo project ID and notification permission.
+- Reopen supported data you've already loaded when offline. The on-device cache uses SQLCipher, with its database key stored in Expo Secure Store.
+- Review and decide pending assistant proposals, and view active sessions or close other sessions.
+- Choose which dashboard cards appear and in what order, set the reporting period and display currency, and explore spending, cash flow, and advanced analytics.
 
 ## Repositories
 
 - [savia-web](https://github.com/diegnghtmr/savia-web) — web app and account setup.
 - [savia-backend](https://github.com/diegnghtmr/savia-backend) — HTTP API and background worker.
 - [savia-mcp](https://github.com/diegnghtmr/savia-mcp) — local MCP protocol server.
+- [savia-cli](https://github.com/diegnghtmr/savia-cli) — command-line client for Savia.
 
 ## Stack
 
@@ -17,11 +27,21 @@ Savia Mobile is the Expo shell for Savia, a personal finance app in development.
 
 ## Run locally
 
-Use the tool versions in `mise.toml`. Start the Expo development server and open the app on a compatible device or emulator. The shell does not need a backend or an account.
+Use the tool versions pinned in `mise.toml`. You need a Supabase Auth project and a running Savia API reachable from the device or emulator. Set these public variables before starting Expo:
+
+| Variable | Value |
+| --- | --- |
+| `EXPO_PUBLIC_SUPABASE_URL` | HTTPS origin of the Supabase project. |
+| `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Supabase publishable key or legacy `anon` key. Never use a service-role key. |
+| `EXPO_PUBLIC_SAVIA_API_URL` | Savia API origin, without a path. Use HTTPS; development builds also accept HTTP on loopback. |
+
+If Supabase email confirmation is enabled for sign-up, allow `co.savia.mobile://auth/callback` as a redirect URL.
+
+Use a native build rather than Expo Go so the app includes the SQLCipher configuration. With the Android or iOS build tools installed, run:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm exec expo start
+pnpm exec expo run:android # or: pnpm exec expo run:ios on macOS
 ```
 
 ## Tests
@@ -33,15 +53,16 @@ pnpm run audit
 pnpm audit:test
 ```
 
-The Jest suite covers the shell. The audit checks the file inventory and source boundary; its fixtures verify that unauthorized paths and networked source are rejected.
+`pnpm run audit` runs the repository boundary audit; plain `pnpm audit` is pnpm's dependency vulnerability check. `pnpm audit:test` exercises the repository audit rules.
 
 ## Repository structure
 
 | Path | Purpose |
 | --- | --- |
-| `src/app/` | Expo Router layout, home screen, and not-found screen |
-| `src/mobile-shell/` | Color palettes for the shell |
-| `__tests__/` | Shell component tests |
+| `src/app/` | Expo Router entry points, screen wiring, and sign-up callback |
+| `src/foundation/` | Authentication, API clients, and encrypted offline storage |
+| `src/mobile-shell/` | Screens and device integrations |
+| `__tests__/` | Jest tests |
 | `scripts/` | Repository audit and its tests |
 
 ## License
