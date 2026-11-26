@@ -57,7 +57,7 @@ export async function audit(target = root, parent = join(target, "..")) {
     if (error.code !== "ENOENT") throw error;
   });
   const files = (await walk(target)).map((path) => relative(target, path).split(sep).join("/")).sort();
-  if (files.some((path) => artifact.test(path))) throw new Error("generated or documentation-like executable path rejected");
+  if (files.some((path) => path !== "README.md" && artifact.test(path))) throw new Error("generated or documentation-like executable path rejected");
   let sqlite = false;
   for (const path of files) {
     if (!sourceFile.test(path) || testFile.test(path) || path === "scripts/audit.mjs") continue;

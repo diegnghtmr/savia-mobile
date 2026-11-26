@@ -120,12 +120,17 @@ for (const [name, path, source, reason] of [
   });
 }
 
-for (const path of ["requirements.txt", "CMakeLists.txt", "proof.md", "proof.mdx", "README.sh", "bundle.hbc"]) {
+for (const path of ["requirements.txt", "CMakeLists.txt", "proof.md", "proof.mdx", "README.sh", "README-copy.md", "src/README.md", "bundle.hbc"]) {
   test(`rejects unrelated scaffold artifacts: ${path}`, async (t) => {
     const app = await fixture(t, { [path]: "fixture\n" });
     await assert.rejects(audit(app), /generated or documentation-like executable path rejected/);
   });
 }
+
+test("accepts the root README and LICENSE", async (t) => {
+  const app = await fixture(t, { "README.md": "# Savia Mobile\n", LICENSE: "MIT\n" });
+  await audit(app);
+});
 
 // Reviewer regression (verify mwstw4vi). Append to scripts/audit.test.mjs.
 test("receipt picker audit exception does not allow writing image bytes", async (t) => {
